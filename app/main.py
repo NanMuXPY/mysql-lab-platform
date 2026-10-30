@@ -6,9 +6,9 @@ MVP 接口进度（交接文档第六节 8 个接口）：
   [x] GET  /api/me                任务 3（调试用）
   [x] POST /api/labs              任务 4（批量创建，后台线程池限流）
   [x] GET  /api/labs/{id}         任务 4（进度轮询）
-  [ ] POST /api/labs/{id}/stop    任务 5
-  [ ] DELETE /api/labs/{id}       任务 5
-  [ ] POST /api/instances/{id}/reset  任务 5
+  [x] POST /api/labs/{id}/stop    任务 5（停止，容器与数据保留）
+  [x] POST /api/labs/{id}/recycle 任务 5（回收，不可逆，删数据还端口）
+  [x] POST /api/instances/{id}/reset  任务 5（重置，数据复原密码更换）
   [ ] GET  /api/labs/{id}/export  任务 6
 
 启动: python3.11 -m uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -173,6 +173,43 @@ def api_lab_errors(lab_id: int,
                    user: dict = Depends(require_role("teacher", "assistant"))):
     """错题诊断（P1）：增量采集学生 SQL 后，返回每人练习量/问题分布/最近错例。"""
     return insights.lab_errors(lab_id)
+
+
+# ---------------------------------------------------------------------------
+# 任务 5：实例生命周期（停止 / 回收 / 重置）
+# ---------------------------------------------------------------------------
+@app.post("/api/labs/{lab_id}/stop")
+def api_stop_lab(lab_id: int, request: Request,
+                 user: dict = Depends(require_role("teacher", "assistant"))):
+    """停止实验单全部实例（容器保留，学生暂时连不上；数据与端口不动）。"""
+    result = labs.stop_lab(lab_id)
+    audit.log(user["id"], "lab.stop", target=str(lab_id),
+              detail=f"stopped={result['stopped']}",
+              ip=request.client.host if request.client else "")
+    return result
+
+
+@app.post("/api/labs/{lab_id}/recycle")
+def api_recycle_lab(lab_id: int, request: Request,
+                    user: dict = Depends(require_role("teacher", "assistant"))):
+    """回收实验单（不可逆）：删容器与数据卷，端口归还池子。"""
+    result = labs.recycle_lab(lab_id)
+    audit.log(user["id"], "lab.recycle", target=str(lab_id),
+              detail=f"recycled={result['recycled']}",
+              ip=request.client.host if request.client else "")
+    return result
+
+
+@app.post("/api/instances/{instance_id}/reset")
+def api_reset_instance(instance_id: int, request: Request,
+                       user: dict = Depends(require_role("teacher", "assistant"))):
+    """重置单个学生实例（数据复原、密码更换；新密码仅在本次响应中返回）。"""
+    result = labs.reset_instance(instance_id)
+    audit.log(user["id"], "instance.reset",
+              target=str(instance_id),
+              detail=f"student={result['student_id']} port={result['port']}",
+              ip=request.client.host if request.client else "")
+    return result
 
 
 # ---------------------------------------------------------------------------

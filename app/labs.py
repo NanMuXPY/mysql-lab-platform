@@ -242,3 +242,108 @@ def _is_port_conflict(msg: str) -> bool:
     return ("port is already allocated" in m
             or "address already in use" in m
             or "bind for" in m and "failed" in m)
+
+
+# ---------------------------------------------------------------------------
+# 生命周期管理（任务 5）：停止 / 重置 / 回收
+# ---------------------------------------------------------------------------
+def stop_lab(lab_id: int) -> dict:
+    """停止实验单全部运行中实例（docker stop，数据保留，端口租约保留）。
+
+    只允许对 running 实验单操作：creating 阶段停会和后台交付线程打架
+    （交付线程健康确认后会改写状态），pending/终态则无意义。
+    """
+    lab = models.get_lab(lab_id)
+    if lab["status"] != "running":
+        raise PlatformError(
+            f"实验单当前状态为 {lab['status']}，仅 running 可停止"
+        )
+    n = 0
+    for inst in models.list_instances_by_lab(lab_id):
+        if inst["status"] != "running":
+            continue
+        docker_svc.stop_instance(inst["container_name"])
+        models.update_instance_status(inst["id"], "stopped")
+        n += 1
+    models.update_lab_status(lab_id, "stopped")
+    log.info("实验单 %s 已停止 %d 个实例", lab_id, n)
+    return {"lab_id": lab_id, "stopped": n}
+
+
+def recycle_lab(lab_id: int) -> dict:
+    """回收实验单：删容器 + 删数据卷 + 还端口，实例与实验单置 recycled。
+
+    这是不可逆操作（学生数据物理删除），路由层做审计，UI 做二次确认。
+    failed 实例一并清理残留容器；recycled 的跳过（幂等）。
+    """
+    lab = models.get_lab(lab_id)
+    if lab["status"] in ("recycled",):
+        raise PlatformError("实验单已回收，无需重复操作")
+    if lab["status"] in ("pending", "creating"):
+        raise PlatformError("实验单交付中，请等待完成后再回收")
+    n = 0
+    for inst in models.list_instances_by_lab(lab_id):
+        if inst["status"] == "recycled":
+            continue
+        try:
+            docker_svc.remove_instance(inst["container_name"])
+        except Exception as e:
+            log.warning("实验单 %s 实例 %s 容器清理失败（继续回收）: %s",
+                        lab_id, inst["student_id"], e)
+        try:
+            docker_svc.delete_volume(inst["volume_path"])
+        except Exception as e:
+            log.warning("实验单 %s 实例 %s 数据卷清理失败: %s",
+                        lab_id, inst["student_id"], e)
+        ports.release_by_instance(inst["container_name"])
+        models.update_instance_status(inst["id"], "recycled")
+        n += 1
+    models.update_lab_status(lab_id, "recycled")
+    log.info("实验单 %s 已回收 %d 个实例，端口已归还", lab_id, n)
+    return {"lab_id": lab_id, "recycled": n}
+
+
+def reset_instance(instance_id: int) -> dict:
+    """重置单个学生实例：删容器 + 清卷 + 同端口重建（数据复原、密码更换）。
+
+    重置 = 重新走一遍交付流程（init SQL 只在空卷上执行，见 docker_svc 坑清单），
+    因此学生密码会更换，返回值携带新密码（仅此一次，之后从 CSV 重新导出）。
+    同步执行，全程约 40-90 秒。
+    """
+    inst = models.get_instance(instance_id)
+    if inst["status"] not in ("running", "stopped"):
+        raise PlatformError(
+            f"实例状态为 {inst['status']}，仅 running/stopped 可重置"
+        )
+    lab = models.get_lab(inst["lab_id"])
+    tmpl = models.get_template(lab["template_id"])
+    creds = docker_svc.generate_credentials()
+    models.update_instance_status(instance_id, "creating")
+    try:
+        docker_svc.remove_instance(inst["container_name"])
+        docker_svc.clear_volume(inst["volume_path"])
+        docker_svc.create_mysql_instance(
+            lab["id"], inst["student_id"], inst["port"], inst["volume_path"],
+            tmpl["init_sql_path"], inst["db_name"], inst["db_user"],
+            creds["db_pass"], creds["root_password"],
+        )
+        docker_svc.wait_until_running(inst["container_name"],
+                                      timeout=config.CREATE_WAIT_TIMEOUT)
+        docker_svc.ping_mysql(inst["container_name"], inst["db_user"],
+                              creds["db_pass"], inst["db_name"],
+                              retries=config.CREATE_PING_RETRIES,
+                              interval=config.CREATE_PING_INTERVAL)
+        try:  # 重置后重新设采集基线，避免把重置过程算成学生操作
+            insights.set_baseline(inst["container_name"], inst["volume_path"])
+        except Exception as e:
+            log.warning("实例 %s 重置后设基线失败: %s", inst["container_name"], e)
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"[:500]
+        models.update_instance_status(instance_id, "failed", last_error=err)
+        raise PlatformError(f"重置失败（已留痕）: {err}")
+    models.update_instance_credentials(instance_id, crypto.encrypt(creds["db_pass"]))
+    models.update_instance_status(instance_id, "running")
+    log.info("实例 %s（学生 %s）已重置，端口 %d 不变",
+             instance_id, inst["student_id"], inst["port"])
+    return {"instance_id": instance_id, "student_id": inst["student_id"],
+            "port": inst["port"], "db_password": creds["db_pass"]}

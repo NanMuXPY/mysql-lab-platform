@@ -238,39 +238,80 @@ async function loadLabs() {
   const labs = await api("/api/labs");
   const box = document.getElementById("labs");
   if (!labs.length) { box.innerHTML = `<p class="hint">还没有实验单，先在上方部署一个。</p>`; return; }
-  // 默认只看最近 5 条：一学期会攒几十个实验单，全铺开既刷屏又浪费轮询请求
-  const shown = SHOW_ALL ? labs : labs.slice(0, 5);
-  const details = await Promise.all(shown.map(l => api("/api/labs/" + l.id).catch(() => null)));
-  const html = shown.map((l, i) => {
+  // recycled 折叠：一学期会攒几十个历史实验单，默认只看活跃的最近 5 条
+  const visible = SHOW_ALL ? labs : labs.filter(l => l.status !== "recycled").slice(0, 5);
+  const details = await Promise.all(visible.map(l => api("/api/labs/" + l.id).catch(() => null)));
+  const html = visible.map((l, i) => {
     const p = details[i];
+    const busy = p && ["pending", "creating"].includes(p.status);
     const rows = p && p.instances.length ? `
-      <table><tr><th>学号</th><th>端口</th><th>数据库</th><th>用户</th><th>状态</th><th>备注</th></tr>
+      <table><tr><th>学号</th><th>端口</th><th>数据库</th><th>用户</th><th>状态</th><th>操作</th></tr>
       ${p.instances.map(x => `<tr>
         <td>${x.student_id}</td><td>${x.port}</td><td>${x.db_name}</td><td>${x.db_user}</td>
-        <td>${badge(x.status)}</td><td style="color:var(--red);font-size:12px">${x.last_error || ""}</td>
+        <td>${badge(x.status)}${x.last_error ? ` <span style="color:var(--red);font-size:12px">${x.last_error}</span>` : ""}</td>
+        <td>${(x.status === "running" || x.status === "stopped") && !busy
+              ? `<button class="ghost small" onclick="resetInst(${l.id},${x.id},'${x.student_id}')">重置</button>` : ""}</td>
       </tr>`).join("")}</table>` : "";
-    const busy = p && ["pending", "creating"].includes(p.status);
-    return `<div style="border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:10px">
+    // 剩余时长倒计时：到期前 10 分钟标黄提醒；已过期未回收标红
+    let remainTxt = "";
+    if ((l.status === "running" || l.status === "stopped") && l.ends_at) {
+      const mins = Math.round((new Date(l.ends_at) - Date.now()) / 60000);
+      if (mins > 10) remainTxt = ` · 剩余 ${mins} 分钟`;
+      else if (mins > 0) remainTxt = ` · <span style="color:var(--amber)">即将到期（${mins} 分钟）</span>`;
+      else remainTxt = ` · <span style="color:var(--red)">已到期，待回收</span>`;
+    }
+    const acts = [];
+    if (l.status === "running" && !busy) {
+      acts.push(`<button class="ghost small" onclick="labAction(${l.id},'stop','停止后所有学生将暂时无法连接，确认停止实验单 #${l.id}？')">停止</button>`);
+    }
+    if (l.status !== "recycled" && !busy) {
+      acts.push(`<button class="ghost small" style="color:var(--red);border-color:var(--red)"
+        onclick="labAction(${l.id},'recycle','⚠ 将删除实验单 #${l.id} 全部 ${l.students} 个学生的数据（不可恢复），确认回收？')">回收</button>`);
+    }
+    return `<div style="border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:10px${l.status === "recycled" ? ";opacity:.6" : ""}">
       <div class="lab-head">
         <div><b>#${l.id} ${l.name}</b>
-          <span class="meta">${l.class_name || ""} · ${l.template_name} · ${l.students} 人 ${badge(l.status)}
+          <span class="meta">${l.class_name || ""} · ${l.template_name} · ${l.students} 人 ${badge(l.status)}${remainTxt}
           ${busy ? '<span class="spin"></span>交付中' : ""}</span></div>
         <div>
           <button class="ghost small" onclick="loadErrors(${l.id})">错题诊断</button>
           ${p && p.summary.running ? `<button class="ghost small" onclick="exportCsv(${l.id})">导出连接信息 CSV</button>` : ""}
+          ${acts.join(" ")}
         </div>
       </div>${rows}<div id="err-${l.id}">${DIAG[l.id] || ""}</div></div>`;
   }).join("");
-  const more = labs.length > 5
+  const hidden = labs.length - visible.length;
+  const more = (labs.some(l => l.status === "recycled") || labs.length > 5)
     ? `<div style="text-align:center;margin-top:6px">
          <button class="ghost small" onclick="toggleAll()">${
-           SHOW_ALL ? "收起，只看最近 5 条" : `显示全部 ${labs.length} 个实验单`}</button>
+           SHOW_ALL ? "收起，只看活跃实验单" : `显示全部 ${labs.length} 个（含回收的 ${labs.filter(l => l.status === "recycled").length} 个）`}</button>
        </div>` : "";
   const full = html + more;
   // 数据没变就不重建 DOM：既消除 5 秒一次的闪烁，也保住已展开的诊断结果
   if (full === LAST_LABS_HTML) return;
   LAST_LABS_HTML = full;
   box.innerHTML = full;
+}
+
+// 任务 5：停止 / 回收（回收不可逆，confirm 文案里写明后果）
+async function labAction(id, action, msg) {
+  if (!confirm(msg)) return;
+  try {
+    await api(`/api/labs/${id}/${action}`, { method: "POST" });
+    LAST_LABS_HTML = "";
+    loadLabs();
+  } catch (e) { alert("操作失败: " + e.message); }
+}
+
+// 任务 5：重置单个学生实例（同步执行约 1 分钟，期间按钮悬空由轮询重渲染兜底）
+async function resetInst(labId, instId, sid) {
+  if (!confirm(`重置 ${sid}：练习数据全部清空、密码更换，确认重置？`)) return;
+  try {
+    const r = await api(`/api/instances/${instId}/reset`, { method: "POST" });
+    LAST_LABS_HTML = "";
+    loadLabs();
+    alert(`${sid} 重置完成，新密码：${r.db_password}\n（端口不变，请重新导出 CSV 发给学生）`);
+  } catch (e) { alert("重置失败: " + e.message); }
 }
 
 function toggleAll() { SHOW_ALL = !SHOW_ALL; LAST_LABS_HTML = ""; loadLabs(); }

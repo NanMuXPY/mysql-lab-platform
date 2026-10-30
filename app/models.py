@@ -235,12 +235,35 @@ def list_instances_by_lab(lab_id: int) -> list[dict]:
     conn = db.connect()
     try:
         rows = conn.execute(
-            "SELECT id, student_id, container_name, port, db_name, db_user, status, "
-            "last_error FROM instances WHERE lab_id = ? ORDER BY id", (lab_id,)
+            "SELECT id, student_id, container_name, volume_path, port, db_name, "
+            "db_user, status, last_error FROM instances WHERE lab_id = ? ORDER BY id",
+            (lab_id,)
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
+
+
+def get_instance(instance_id: int) -> dict:
+    conn = db.connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM instances WHERE id = ?", (instance_id,)
+        ).fetchone()
+        if not row:
+            raise NotFound(f"实例 {instance_id} 不存在")
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def update_instance_credentials(instance_id: int, db_pass_enc: str) -> None:
+    """重置后更换学生密码（Fernet 密文）。"""
+    with db.write() as conn:
+        conn.execute(
+            "UPDATE instances SET db_pass_enc = ? WHERE id = ?",
+            (db_pass_enc, instance_id),
+        )
 
 
 # ---------------------------------------------------------------------------

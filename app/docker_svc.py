@@ -258,6 +258,17 @@ def ping_mysql(container_name: str, user: str, password: str, db: str,
 # ---------------------------------------------------------------------------
 # 销毁
 # ---------------------------------------------------------------------------
+def stop_instance(container_name: str, timeout: int = 30) -> None:
+    """优雅停止容器（mysqld 收 SIGTERM 落盘后退出）。幂等：容器不存在直接返回。"""
+    try:
+        c = _client().containers.get(container_name)
+    except NotFound:
+        return  # 幂等
+    except APIError as e:
+        raise ProviderError(f"Docker API 停止失败: {e}") from e
+    c.stop(timeout=timeout)
+
+
 def remove_instance(container_name: str) -> None:
     """删除容器（不动数据卷）。重置 = remove_instance + clear_volume + create。"""
     try:
