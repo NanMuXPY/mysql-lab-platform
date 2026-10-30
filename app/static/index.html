@@ -118,6 +118,24 @@
       <h2>③ 实验单 <small>创建中的实验单每 5 秒自动刷新</small></h2>
       <div id="labs"></div>
     </div>
+
+    <div class="card">
+      <h2>④ 学生信息总览 <small>所有未回收实验单的实例，按需加载</small></h2>
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
+        <input id="f-search" placeholder="按学号 / 实验名 / 班级筛选" style="flex:1"
+               oninput="renderStudents()">
+        <button class="ghost small" onclick="loadStudents()">刷新</button>
+      </div>
+      <div id="stu-box"><p class="hint">点击「刷新」加载全部在册学生实例。</p></div>
+    </div>
+
+    <div class="card">
+      <h2>⑤ 审计日志 <small>登录 / 部署 / 停止 / 重置 / 回收全留痕，最多 500 条</small></h2>
+      <div style="margin-bottom:8px">
+        <button class="ghost small" onclick="loadAudit()">加载最近日志</button>
+      </div>
+      <div id="audit-box"><p class="hint">点击「加载最近日志」查看操作记录。</p></div>
+    </div>
   </div>
 </div>
 
@@ -357,6 +375,56 @@ async function loadErrors(id) {
     box.innerHTML = `<p style="color:var(--red)">${esc(e.message)}</p>`;
   }
   DIAG[id] = box.innerHTML;  // 缓存诊断结果，5 秒轮询重渲染后仍能看到
+}
+
+// 任务 6：学生信息总览（懒加载 + 前端筛选，不进 5 秒轮询）
+let STU = [];
+async function loadStudents() {
+  $("stu-box").innerHTML = '<p class="hint"><span class="spin"></span>加载中…</p>';
+  try {
+    STU = (await api("/api/instances/overview")).instances;
+    renderStudents();
+  } catch (e) { $("stu-box").innerHTML = `<p style="color:var(--red)">${esc(e.message)}</p>`; }
+}
+function renderStudents() {
+  const q = val("f-search").toLowerCase();
+  const list = q ? STU.filter(x =>
+    [x.student_id, x.lab_name, x.class_name].some(v => (v || "").toLowerCase().includes(q))) : STU;
+  if (!STU.length) { $("stu-box").innerHTML = '<p class="hint">暂无在册学生实例。</p>'; return; }
+  $("stu-box").innerHTML =
+    `<p class="hint">共 ${STU.length} 个实例（活跃 ${STU.filter(x => x.status !== "failed").length} 个）` +
+    (q ? `，筛选出 ${list.length} 个` : "") + `。凭据请用各实验单的「导出连接信息 CSV」。</p>` +
+    (list.length ? `<table><tr><th>学号</th><th>实验单</th><th>班级</th><th>端口</th><th>数据库</th><th>状态</th><th>备注</th></tr>` +
+      list.map(x => `<tr>
+        <td><b>${esc(x.student_id)}</b></td>
+        <td>#${x.lab_id} ${esc(x.lab_name)}</td>
+        <td>${esc(x.class_name || "")}</td>
+        <td>${x.port}</td><td>${esc(x.db_name)}</td>
+        <td>${badge(x.status)}</td>
+        <td style="color:var(--red);font-size:12px">${esc(x.last_error || "")}</td>
+      </tr>`).join("") + "</table>"
+      : '<p class="hint">没有匹配的记录。</p>');
+}
+
+// 任务 6：审计日志（懒加载）
+const AUDIT_CN = { "login": "登录", "lab.create": "部署实验", "lab.stop": "停止实验",
+                   "lab.recycle": "回收实验", "instance.reset": "重置实例" };
+async function loadAudit() {
+  $("audit-box").innerHTML = '<p class="hint"><span class="spin"></span>加载中…</p>';
+  try {
+    const rows = await api("/api/audit?limit=200");
+    if (!rows.length) { $("audit-box").innerHTML = '<p class="hint">暂无记录。</p>'; return; }
+    $("audit-box").innerHTML = `<table>
+      <tr><th>时间</th><th>操作人</th><th>动作</th><th>对象</th><th>详情</th><th>IP</th></tr>` +
+      rows.map(a => `<tr>
+        <td style="white-space:nowrap">${esc((a.created_at || "").replace("T", " ").slice(0, 19))}</td>
+        <td>${esc(a.actor || "-")}</td>
+        <td><span class="badge b-creat">${AUDIT_CN[a.action] || a.action}</span></td>
+        <td>${esc(a.target)}</td>
+        <td class="hint" style="margin:0">${esc(a.detail)}</td>
+        <td>${esc(a.ip || "")}</td>
+      </tr>`).join("") + "</table>";
+  } catch (e) { $("audit-box").innerHTML = `<p style="color:var(--red)">${esc(e.message)}</p>`; }
 }
 
 // 开发期便利：预填教师演示账号（上线前删掉这两行）

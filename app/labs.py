@@ -105,6 +105,32 @@ def list_labs() -> list[dict]:
         conn.close()
 
 
+def overview() -> dict:
+    """学生信息总览（任务 6）：所有未回收实验单的实例扁平化。
+
+    教师找某个学生连哪个端口时不用逐个实验单展开；密码不入此接口
+    （要凭据走 CSV 导出，避免页面常驻明文密码）。
+    """
+    conn = db.connect()
+    try:
+        rows = conn.execute(
+            "SELECT i.id, i.lab_id, l.name AS lab_name, l.class_name, "
+            "l.status AS lab_status, i.student_id, i.port, i.db_name, "
+            "i.db_user, i.status, i.last_error "
+            "FROM instances i JOIN labs l ON l.id = i.lab_id "
+            "WHERE l.status != 'recycled' "
+            "ORDER BY l.id DESC, i.id"
+        ).fetchall()
+    finally:
+        conn.close()
+    items = [dict(r) for r in rows]
+    return {
+        "total": len(items),
+        "active": sum(1 for x in items if x["status"] in ("creating", "running", "stopped")),
+        "instances": items,
+    }
+
+
 def export_credentials(lab_id: int) -> list[dict]:
     """导出某实验单全部学生的连接信息（含解密后的密码，仅教师角色路由调用）。
 

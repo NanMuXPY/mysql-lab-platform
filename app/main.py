@@ -9,7 +9,9 @@ MVP 接口进度（交接文档第六节 8 个接口）：
   [x] POST /api/labs/{id}/stop    任务 5（停止，容器与数据保留）
   [x] POST /api/labs/{id}/recycle 任务 5（回收，不可逆，删数据还端口）
   [x] POST /api/instances/{id}/reset  任务 5（重置，数据复原密码更换）
-  [ ] GET  /api/labs/{id}/export  任务 6
+  [x] GET  /api/labs/{id}/export  任务 6（CSV，utf-8-sig）
+  [x] GET  /api/instances/overview 任务 6（学生信息总览）
+  [x] GET  /api/audit            任务 6（审计日志页面）
 
 启动: python3.11 -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 """
@@ -173,6 +175,22 @@ def api_lab_errors(lab_id: int,
                    user: dict = Depends(require_role("teacher", "assistant"))):
     """错题诊断（P1）：增量采集学生 SQL 后，返回每人练习量/问题分布/最近错例。"""
     return insights.lab_errors(lab_id)
+
+
+# ---------------------------------------------------------------------------
+# 任务 6：学生信息总览 + 审计日志
+# ---------------------------------------------------------------------------
+@app.get("/api/instances/overview")
+def api_instances_overview(user: dict = Depends(require_role("teacher", "assistant"))):
+    """学生信息总览：未回收实验单的全部实例（不含密码，凭据走 CSV）。"""
+    return labs.overview()
+
+
+@app.get("/api/audit")
+def api_audit(limit: int = 100,
+              user: dict = Depends(require_role("teacher", "assistant"))):
+    """最近审计日志（登录/创建/停止/回收/重置全留痕），最多 500 条。"""
+    return audit.recent(min(max(limit, 1), 500))
 
 
 # ---------------------------------------------------------------------------
