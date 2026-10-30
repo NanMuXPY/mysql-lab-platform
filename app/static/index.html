@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL 实验平台 · 教师端</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --line: #e5e7eb;
+    --text: #1f2329; --muted: #6b7280;
+    --blue: #2563eb; --blue-soft: #eff6ff;
+    --green: #16a34a; --green-soft: #f0fdf4;
+    --amber: #d97706; --amber-soft: #fffbeb;
+    --red: #dc2626; --red-soft: #fef2f2;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+         background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.6; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 24px 16px 64px; }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+  header h1 { font-size: 18px; font-weight: 600; }
+  header .who { color: var(--muted); font-size: 13px; display: flex; gap: 12px; align-items: center; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+          padding: 20px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; font-weight: 600; margin-bottom: 12px; }
+  .card h2 small { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 8px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  input, textarea, select { width: 100%; border: 1px solid var(--line); border-radius: 8px;
+          padding: 8px 10px; font-size: 14px; font-family: inherit; background: #fff; }
+  input:focus, textarea:focus, select:focus { outline: 2px solid var(--blue-soft); border-color: var(--blue); }
+  textarea { resize: vertical; min-height: 72px; }
+  .row { display: flex; gap: 12px; }
+  .row > div { flex: 1; }
+  button { border: none; border-radius: 8px; padding: 9px 18px; font-size: 14px;
+           cursor: pointer; background: var(--blue); color: #fff; font-family: inherit; }
+  button:hover { opacity: .9; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.ghost { background: #fff; color: var(--text); border: 1px solid var(--line); }
+  button.small { padding: 4px 10px; font-size: 12px; }
+  .tpl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+  .tpl { border: 1.5px solid var(--line); border-radius: 10px; padding: 12px; cursor: pointer; }
+  .tpl:hover { border-color: var(--blue); }
+  .tpl.sel { border-color: var(--blue); background: var(--blue-soft); }
+  .tpl b { display: block; font-size: 14px; margin-bottom: 4px; }
+  .tpl span { font-size: 12px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; }
+  .b-run { background: var(--green-soft); color: var(--green); }
+  .b-creat { background: var(--blue-soft); color: var(--blue); }
+  .b-fail { background: var(--red-soft); color: var(--red); }
+  .b-stop { background: var(--amber-soft); color: var(--amber); }
+  .b-rec { background: #f3f4f6; color: var(--muted); }
+  .lab-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .lab-head .meta { color: var(--muted); font-size: 12px; }
+  .err { background: var(--red-soft); color: var(--red); border-radius: 8px;
+         padding: 8px 12px; margin-top: 10px; font-size: 13px; display: none; }
+  .ok { background: var(--green-soft); color: var(--green); border-radius: 8px;
+        padding: 8px 12px; margin-top: 10px; font-size: 13px; display: none; }
+  #login { max-width: 360px; margin: 80px auto; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--blue);
+          border-top-color: transparent; border-radius: 50%; animation: r .8s linear infinite;
+          vertical-align: -1px; margin-right: 6px; }
+  @keyframes r { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>MySQL 实验平台 · 教师端</h1>
+    <div class="who" id="who"></div>
+  </header>
+
+  <!-- 登录 -->
+  <div class="card" id="login">
+    <h2>教师登录</h2>
+    <label>账号</label>
+    <input id="f-login" placeholder="教师账号">
+    <label>密码</label>
+    <input id="f-pass" type="password" placeholder="密码" onkeydown="if(event.key==='Enter')doLogin()">
+    <div style="margin-top:14px"><button style="width:100%" onclick="doLogin()">登 录</button></div>
+    <div class="err" id="login-err"></div>
+    <p class="hint">学生没有网页入口：学生用 Navicat / DBeaver 直连分配到的地址即可。</p>
+  </div>
+
+  <!-- 主界面 -->
+  <div id="main" style="display:none">
+    <div class="card">
+      <h2>① 选择预设课程 <small id="tpl-count"></small></h2>
+      <div class="tpl-grid" id="tpl-grid"></div>
+    </div>
+
+    <div class="card">
+      <h2>② 一键部署</h2>
+      <div class="row">
+        <div><label>实验名称</label><input id="f-name" placeholder="如：数据库原理-实验一"></div>
+        <div><label>班级</label><input id="f-class" placeholder="如：2402班"></div>
+        <div><label>时长（分钟，到期自动回收）</label><input id="f-dur" type="number" value="120"></div>
+      </div>
+      <label>学生名单（每行一个学号，或逗号/空格分隔）</label>
+      <textarea id="f-stu" placeholder="240201&#10;240202&#10;240203"></textarea>
+      <div class="row" style="align-items:flex-end; margin-top:8px">
+        <div style="flex:0 0 120px"><label>快捷生成</label></div>
+        <div style="flex:0 0 130px"><input id="f-start" placeholder="起始学号"></div>
+        <div style="flex:0 0 110px"><input id="f-num" type="number" placeholder="人数"></div>
+        <div style="flex:0 0 auto"><button class="ghost" onclick="genIds()">填入名单</button></div>
+        <div style="flex:1"></div>
+        <div style="flex:0 0 auto"><button id="btn-deploy" onclick="deploy()">一键部署 <span id="dep-n"></span></button></div>
+      </div>
+      <div class="err" id="dep-err"></div>
+      <div class="ok" id="dep-ok"></div>
+    </div>
+
+    <div class="card">
+      <h2>③ 实验单 <small>创建中的实验单每 5 秒自动刷新</small></h2>
+      <div id="labs"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+let TOKEN = localStorage.getItem("token") || "";
+let ME = null, TPL = null, SEL_TPL = null, TIMER = null;
+const DIAG = {};          // 已展开的错题诊断结果，轮询重渲染时填回
+let LAST_LABS_HTML = "";  // 上次渲染的实验单 HTML，未变化时不动 DOM
+let SHOW_ALL = false;     // 实验单列表是否展开全部历史
+
+const badge = s => `<span class="badge ${
+  {running:"b-run", creating:"b-creat", pending:"b-creat",
+   failed:"b-fail", stopped:"b-stop", recycled:"b-rec"}[s] || "b-rec"}">${s}</span>`;
+
+function api(path, opt = {}) {
+  opt.headers = { "Content-Type": "application/json",
+                  ...(TOKEN ? { Authorization: "Bearer " + TOKEN } : {}) };
+  return fetch(path, opt).then(async r => {
+    if (r.status === 401) { logout(); throw new Error("登录已过期"); }
+    if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || r.status); }
+    return r.json();
+  });
+}
+
+// 表单元素统一用 $("id") 取：id 带连字符（f-login），不能当隐式全局变量引用
+const $ = id => document.getElementById(id);
+const val = id => ($(id).value || "").trim();
+
+function showErr(id, msg) { const el = document.getElementById(id);
+  el.style.display = msg ? "block" : "none"; el.textContent = msg || ""; }
+function showOk(id, msg) { const el = document.getElementById(id);
+  el.style.display = msg ? "block" : "none"; el.textContent = msg || ""; }
+
+async function doLogin() {
+  showErr("login-err", "");
+  try {
+    const r = await fetch("/api/auth/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ login: val("f-login"), password: $("f-pass").value }),
+    });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || "登录失败"); }
+    const d = await r.json();
+    TOKEN = d.token; localStorage.setItem("token", TOKEN);
+    ME = d; boot();
+  } catch (e) { showErr("login-err", e.message); }
+}
+
+function logout() {
+  TOKEN = ""; ME = null; localStorage.removeItem("token");
+  clearInterval(TIMER);
+  document.getElementById("login").style.display = "";
+  document.getElementById("main").style.display = "none";
+  document.getElementById("who").innerHTML = "";
+}
+
+async function boot() {
+  try {
+    ME = await api("/api/me");
+  } catch (e) { return; }
+  if (!["teacher", "assistant"].includes(ME.role)) {
+    alert("仅教师/助教可使用本页面"); return logout();
+  }
+  document.getElementById("login").style.display = "none";
+  document.getElementById("main").style.display = "";
+  document.getElementById("who").innerHTML =
+    `${ME.name}（${ME.role}） <button class="ghost small" onclick="logout()">退出</button>`;
+  loadTemplates(); loadLabs();
+  clearInterval(TIMER);
+  TIMER = setInterval(loadLabs, 5000);
+}
+
+async function loadTemplates() {
+  TPL = await api("/api/templates");
+  document.getElementById("tpl-count").textContent = `共 ${TPL.length} 门`;
+  document.getElementById("tpl-grid").innerHTML = TPL.map(t => `
+    <div class="tpl ${SEL_TPL === t.id ? "sel" : ""}" onclick="pickTpl(${t.id})">
+      <b>${t.name}</b><span>${t.description || ""}</span>
+    </div>`).join("");
+  updDepBtn();
+}
+
+function pickTpl(id) { SEL_TPL = id; loadTemplates(); }
+function parseIds() {
+  return $("f-stu").value.split(/[\s,;，；、]+/).map(s => s.trim()).filter(Boolean);
+}
+function updDepBtn() {
+  document.getElementById("dep-n").textContent = parseIds().length ? `（${parseIds().length} 人）` : "";
+}
+document.addEventListener("input", e => { if (e.target.id === "f-stu") updDepBtn(); });
+
+function genIds() {
+  const s = val("f-start"), n = parseInt(val("f-num") || 0);
+  if (!/^\d+$/.test(s) || !(n > 0)) return showErr("dep-err", "快捷生成：请填数字起始学号和人数");
+  const width = s.length;
+  const start = parseInt(s);
+  $("f-stu").value = Array.from({ length: n }, (_, i) => String(start + i).padStart(width, "0")).join("\n");
+  showErr("dep-err", ""); updDepBtn();
+}
+
+async function deploy() {
+  showErr("dep-err", ""); showOk("dep-ok", "");
+  if (!SEL_TPL) return showErr("dep-err", "请先在上方选择一门课程");
+  const ids = parseIds();
+  if (!ids.length) return showErr("dep-err", "请填写学生名单");
+  try {
+    const r = await api("/api/labs", { method: "POST", body: JSON.stringify({
+      template_id: SEL_TPL, name: val("f-name") || "未命名实验",
+      class_name: val("f-class"), duration_min: parseInt(val("f-dur") || 120),
+      student_ids: ids,
+    })});
+    showOk("dep-ok", `已受理：实验单 #${r.lab_id}，${r.total} 人正在交付，可在下方查看进度`);
+    $("f-stu").value = ""; updDepBtn();
+    loadLabs();
+  } catch (e) { showErr("dep-err", e.message); }
+}
+
+async function loadLabs() {
+  const labs = await api("/api/labs");
+  const box = document.getElementById("labs");
+  if (!labs.length) { box.innerHTML = `<p class="hint">还没有实验单，先在上方部署一个。</p>`; return; }
+  // 默认只看最近 5 条：一学期会攒几十个实验单，全铺开既刷屏又浪费轮询请求
+  const shown = SHOW_ALL ? labs : labs.slice(0, 5);
+  const details = await Promise.all(shown.map(l => api("/api/labs/" + l.id).catch(() => null)));
+  const html = shown.map((l, i) => {
+    const p = details[i];
+    const rows = p && p.instances.length ? `
+      <table><tr><th>学号</th><th>端口</th><th>数据库</th><th>用户</th><th>状态</th><th>备注</th></tr>
+      ${p.instances.map(x => `<tr>
+        <td>${x.student_id}</td><td>${x.port}</td><td>${x.db_name}</td><td>${x.db_user}</td>
+        <td>${badge(x.status)}</td><td style="color:var(--red);font-size:12px">${x.last_error || ""}</td>
+      </tr>`).join("")}</table>` : "";
+    const busy = p && ["pending", "creating"].includes(p.status);
+    return `<div style="border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:10px">
+      <div class="lab-head">
+        <div><b>#${l.id} ${l.name}</b>
+          <span class="meta">${l.class_name || ""} · ${l.template_name} · ${l.students} 人 ${badge(l.status)}
+          ${busy ? '<span class="spin"></span>交付中' : ""}</span></div>
+        <div>
+          <button class="ghost small" onclick="loadErrors(${l.id})">错题诊断</button>
+          ${p && p.summary.running ? `<button class="ghost small" onclick="exportCsv(${l.id})">导出连接信息 CSV</button>` : ""}
+        </div>
+      </div>${rows}<div id="err-${l.id}">${DIAG[l.id] || ""}</div></div>`;
+  }).join("");
+  const more = labs.length > 5
+    ? `<div style="text-align:center;margin-top:6px">
+         <button class="ghost small" onclick="toggleAll()">${
+           SHOW_ALL ? "收起，只看最近 5 条" : `显示全部 ${labs.length} 个实验单`}</button>
+       </div>` : "";
+  const full = html + more;
+  // 数据没变就不重建 DOM：既消除 5 秒一次的闪烁，也保住已展开的诊断结果
+  if (full === LAST_LABS_HTML) return;
+  LAST_LABS_HTML = full;
+  box.innerHTML = full;
+}
+
+function toggleAll() { SHOW_ALL = !SHOW_ALL; LAST_LABS_HTML = ""; loadLabs(); }
+
+async function exportCsv(id) {
+  const r = await fetch(`/api/labs/${id}/export`,
+    { headers: { Authorization: "Bearer " + TOKEN } });
+  if (!r.ok) return alert("导出失败");
+  const blob = await r.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `lab_${id}_credentials.csv`;
+  a.click();
+}
+
+const VERDICT = { syntax_error: "语法错误", unknown_table: "表不存在",
+                  dangerous: "危险操作", hint: "写法提示" };
+const esc = s => String(s || "").replace(/[&<>"]/g,
+  c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+async function loadErrors(id) {
+  const box = document.getElementById("err-" + id);
+  box.innerHTML = '<p class="hint"><span class="spin"></span>正在采集并诊断学生 SQL…</p>';
+  try {
+    const d = await api(`/api/labs/${id}/errors`);
+    const bad = d.students.filter(s => s.problems > 0);
+    const head = `<p class="hint">本轮新采集 ${d.collected.new_queries} 条 SQL，
+      新增问题 ${d.collected.new_problems} 条（采集的是 general_log，学生无需任何配合）</p>`;
+    if (!bad.length) {
+      box.innerHTML = head + '<p class="hint">暂时没有发现错误，学生都在顺利练习中。</p>';
+      return;
+    }
+    box.innerHTML = head + bad.map(s => `
+      <div style="margin:8px 0;padding:10px 12px;background:var(--amber-soft);border-radius:8px">
+        <b>${esc(s.student_id)}</b>
+        <span class="meta">练习 ${s.total} 条 · 正确 ${s.ok} · 问题 ${s.problems}</span>
+        ${s.samples.map(x => `<div style="margin-top:8px">
+          <code style="font-size:12px;color:var(--red)">${esc(x.sql)}</code>
+          <span class="badge b-fail">${VERDICT[x.verdict] || x.verdict}</span>
+          <div class="hint">${esc(x.detail)}</div></div>`).join("")}
+      </div>`).join("");
+  } catch (e) {
+    box.innerHTML = `<p style="color:var(--red)">${esc(e.message)}</p>`;
+  }
+  DIAG[id] = box.innerHTML;  // 缓存诊断结果，5 秒轮询重渲染后仍能看到
+}
+
+// 开发期便利：预填教师演示账号（上线前删掉这两行）
+if (!TOKEN) { $("f-login").value = "teacher"; $("f-pass").value = "<演示用默认密码，部署时须修改>"; }
+
+if (TOKEN) boot();
+</script>
+</body>
+</html>

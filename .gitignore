@@ -1,0 +1,21 @@
+# ---- 敏感文件（绝不入库）----
+.env
+*.pem
+tools/
+data/
+
+# ---- Python ----
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+
+# ---- 项目工作区数据 ----
+.workbuddy/
+*.log
