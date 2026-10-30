@@ -19,3 +19,5 @@ Thumbs.db
 # ---- 项目工作区数据 ----
 .workbuddy/
 *.log
+.playwright-cli/
+.playwright/
