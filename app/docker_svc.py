@@ -293,3 +293,71 @@ def delete_volume(volume_path: str) -> None:
     volume_path = os.path.abspath(volume_path)
     if os.path.isdir(volume_path):
         shutil.rmtree(volume_path)
+
+
+# ---------------------------------------------------------------------------
+# 金镜像快速路径（性能优化：跳过 mysqld --initialize）
+# ---------------------------------------------------------------------------
+def gold_ready() -> bool:
+    """金镜像 datadir + root 密码文件是否就绪。"""
+    return (config.GOLD_DIR.is_dir()
+            and (config.GOLD_DIR / "mysql").is_dir()
+            and config.GOLD_ROOT_PASSWORD_FILE.is_file())
+
+
+def gold_root_password() -> str:
+    return config.GOLD_ROOT_PASSWORD_FILE.read_text(encoding="utf-8").strip()
+
+
+def prepare_volume_from_gold(volume_path: str) -> None:
+    """把金镜像 datadir 拷贝到实例数据卷（cp -a 保留属主 uid/gid）。
+
+    金镜像里只有 MySQL 系统表（无业务库、无用户），
+    拷贝后 entrypoint 跳过 --initialize，直接进入启动。
+    """
+    volume_path = os.path.abspath(volume_path)
+    if os.path.isdir(volume_path):
+        shutil.rmtree(volume_path)
+    shutil.copytree(config.GOLD_DIR, volume_path, symlinks=True)
+
+
+def bootstrap_instance(container_name: str, root_password: str,
+                       db_name: str, db_user: str, db_pass: str,
+                       init_sql_text: str,
+                       retries: int = 30, interval: int = 2) -> None:
+    """金镜像实例的一次性引导：建库/建号/授权/换 root 密码/灌模板 SQL。
+
+    在容器 running 之后由调用方（labs._create_one）执行一次。
+    坑：wait_until_running 的 TCP 探测连的是 docker-proxy——容器一起它就监听，
+    mysqld 未就绪时 TCP 也"通"，所以这里必须自带连接重试（约 1 分钟窗口）。
+    SQL 语法错误不重试（立即失败），只重试连接类错误。
+    """
+    import time
+
+    sql = (
+        f"ALTER USER 'root'@'localhost' IDENTIFIED BY '{root_password}';"
+        f"CREATE DATABASE IF NOT EXISTS `{db_name}` "
+        f"CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+        f"CREATE USER IF NOT EXISTS '{db_user}'@'%' IDENTIFIED BY '{db_pass}';"
+        f"GRANT ALL PRIVILEGES ON `{db_name}`.* TO '{db_user}'@'%';"
+        f"FLUSH PRIVILEGES;"
+        f"USE `{db_name}`;"
+        + init_sql_text
+    )
+    last_err = ""
+    for i in range(retries):
+        try:
+            c = _client().containers.get(container_name)
+            r = c.exec_run(["mysql", "-h127.0.0.1", "-uroot",
+                            f"-p{gold_root_password()}", "-e", sql])
+        except NotFound as e:
+            raise ProviderError("bootstrap 时容器消失") from e
+        except APIError as e:
+            raise ProviderError(f"bootstrap exec 失败: {e}") from e
+        if r.exit_code == 0:
+            return
+        last_err = r.output.decode("utf-8", "replace")[:300]
+        if "ERROR 2003" not in last_err and "Can't connect" not in last_err:
+            break  # 真 SQL 错误，重试无意义
+        time.sleep(interval)
+    raise ProviderError(f"bootstrap 失败（重试 {retries} 次）: {last_err}")

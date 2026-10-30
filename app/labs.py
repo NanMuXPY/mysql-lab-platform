@@ -185,8 +185,25 @@ def _run_batch(lab_id: int, tmpl: dict, student_ids: list[str]) -> None:
     log.info("实验单 %s 完成：成功 %d，失败 %d", lab_id, n_running, n_failed)
 
 
+def _fallback_slow(lab_id: int, student_id: str, container: str, volume: str,
+                   port: int, tmpl: dict, db_name: str, db_user: str,
+                   creds: dict) -> None:
+    """慢路径重建：清卷 + 传统初始化（金镜像不可用/引导失败时的兜底）。"""
+    docker_svc.remove_instance(container)
+    docker_svc.clear_volume(volume)
+    docker_svc.create_mysql_instance(
+        lab_id, student_id, port, volume, tmpl["init_sql_path"],
+        db_name, db_user, creds["db_pass"], creds["root_password"],
+    )
+    docker_svc.wait_until_running(container, timeout=config.CREATE_WAIT_TIMEOUT)
+
+
 def _create_one(lab_id: int, tmpl: dict, student_id: str) -> dict:
-    """单个学生的完整交付，任何失败都回滚干净（端口/容器/错误留痕）。"""
+    """单个学生的完整交付，任何失败都回滚干净（端口/容器/错误留痕）。
+
+    金镜像快路径：datadir 预拷贝跳过 mysqld --initialize（占创建耗时 ~90%），
+    启动后一次 bootstrap SQL 建库建号灌模板；引导失败自动回退慢路径。
+    """
     container = f"lab-{lab_id}-{student_id}"
     volume = str(config.LABS_DATA_DIR / str(lab_id) / student_id)
     safe = (re.sub(r"[^0-9a-zA-Z_]", "_", student_id)[:16]).strip("_") or "stu"
@@ -199,11 +216,15 @@ def _create_one(lab_id: int, tmpl: dict, student_id: str) -> dict:
     ever_leased: list[int] = []  # 本函数租过的端口（含已归还的），失败留痕用
     try:
         # 1-2) 租端口 + 建容器；端口被占（docker-proxy 释放竞态）换端口重试
+        fast = docker_svc.gold_ready()
         for attempt in range(1, config.CREATE_RETRIES + 1):
             port = ports.lease_port(container)
             ever_leased.append(port)
             creds = docker_svc.generate_credentials()
             try:
+                if fast:
+                    # 金镜像：预置系统表 datadir，entrypoint 跳过 --initialize
+                    docker_svc.prepare_volume_from_gold(volume)
                 docker_svc.create_mysql_instance(
                     lab_id, student_id, port, volume, tmpl["init_sql_path"],
                     db_name, db_user, creds["db_pass"], creds["root_password"],
@@ -222,9 +243,21 @@ def _create_one(lab_id: int, tmpl: dict, student_id: str) -> dict:
             lab_id, student_id, container, volume, port, db_name, db_user,
             crypto.encrypt(creds["db_pass"]),
         )
-        # 4) 健康确认：容器 running + 学生账号真实查询通
-        #    （并发初始化下 mysqld 就绪慢，重试窗口见 config 注释坑 #9）
+        # 4) 就绪确认：容器 running + 真实 TCP 可连（金镜像路径此时已就绪）
         docker_svc.wait_until_running(container, timeout=config.CREATE_WAIT_TIMEOUT)
+        if fast:
+            try:
+                with open(tmpl["init_sql_path"], encoding="utf-8") as f:
+                    docker_svc.bootstrap_instance(
+                        container, creds["root_password"], db_name, db_user,
+                        creds["db_pass"], f.read())
+            except docker_svc.ProviderError as e:
+                log.warning("实验 %s 学生 %s 金镜像引导失败，回退慢路径: %s",
+                            lab_id, student_id, e)
+                _fallback_slow(lab_id, student_id, container, volume, port,
+                               tmpl, db_name, db_user, creds)
+        # 5) 健康确认：学生账号真实查询通
+        #    （并发初始化下 mysqld 就绪慢，重试窗口见 config 注释坑 #9）
         docker_svc.ping_mysql(container, db_user, creds["db_pass"], db_name,
                               retries=config.CREATE_PING_RETRIES,
                               interval=config.CREATE_PING_INTERVAL)
@@ -347,7 +380,9 @@ def reset_instance(instance_id: int) -> dict:
     models.update_instance_status(instance_id, "creating")
     try:
         docker_svc.remove_instance(inst["container_name"])
-        docker_svc.clear_volume(inst["volume_path"])
+        fast = docker_svc.gold_ready()
+        if fast:
+            docker_svc.prepare_volume_from_gold(inst["volume_path"])
         docker_svc.create_mysql_instance(
             lab["id"], inst["student_id"], inst["port"], inst["volume_path"],
             tmpl["init_sql_path"], inst["db_name"], inst["db_user"],
@@ -355,6 +390,20 @@ def reset_instance(instance_id: int) -> dict:
         )
         docker_svc.wait_until_running(inst["container_name"],
                                       timeout=config.CREATE_WAIT_TIMEOUT)
+        if fast:
+            try:
+                with open(tmpl["init_sql_path"], encoding="utf-8") as f:
+                    docker_svc.bootstrap_instance(
+                        inst["container_name"], creds["root_password"],
+                        inst["db_name"], inst["db_user"], creds["db_pass"],
+                        f.read())
+            except docker_svc.ProviderError as e:
+                log.warning("实例 %s 重置金镜像引导失败，回退慢路径: %s",
+                            inst["container_name"], e)
+                _fallback_slow(lab["id"], inst["student_id"],
+                               inst["container_name"], inst["volume_path"],
+                               inst["port"], tmpl, inst["db_name"],
+                               inst["db_user"], creds)
         docker_svc.ping_mysql(inst["container_name"], inst["db_user"],
                               creds["db_pass"], inst["db_name"],
                               retries=config.CREATE_PING_RETRIES,

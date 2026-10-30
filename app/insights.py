@@ -284,8 +284,26 @@ def classify(sql: str, tables: set[str] | None = None) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 # 汇总查询（教师端）
 # ---------------------------------------------------------------------------
+# 诊断结果 30s TTL 缓存（性能优化）：采集+sqlglot 解析是 CPU 操作，
+# 教师反复点击或多教师同时看同一实验单时，30s 内直接复用上次结果。
+_DIAG_CACHE: dict[int, tuple[float, dict]] = {}
+_DIAG_TTL = 30.0
+
+
 def lab_errors(lab_id: int, samples_per_student: int = 5, recent: int = 20) -> dict:
     """采集 + 汇总：每个学生的练习总量、问题分布、最近几条原始 SQL。"""
+    import time
+
+    hit = _DIAG_CACHE.get(lab_id)
+    if hit and time.monotonic() - hit[0] < _DIAG_TTL:
+        return hit[1]
+
+    result = _lab_errors_impl(lab_id, samples_per_student, recent)
+    _DIAG_CACHE[lab_id] = (time.monotonic(), result)
+    return result
+
+
+def _lab_errors_impl(lab_id: int, samples_per_student: int, recent: int) -> dict:
     models.get_lab(lab_id)  # 不存在 → NotFound
     collected = collect_lab(lab_id)
     conn = db.connect()

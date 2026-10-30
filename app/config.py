@@ -85,6 +85,16 @@ CREATE_PING_INTERVAL = int(os.environ.get("LAB_PING_INTERVAL", "3"))
 # CSV 导出中的主机地址（空则用请求的 Host）；正式部署设为服务器公网 IP 或域名
 PUBLIC_HOST = os.environ.get("LAB_PUBLIC_HOST", "")
 
+# ---------------------------------------------------------------------------
+# 金镜像（性能优化：跳过 mysqld --initialize，单实例就绪 85s → ~15s）
+# ---------------------------------------------------------------------------
+# 预初始化好的系统表 datadir 模板（由 scripts/make_gold.py 一次性生成）。
+# 原理：entrypoint 见 datadir 非空会跳过 mysqld --initialize（创建耗时的大头），
+#       但也跳过 initdb.d 脚本 → 由 bootstrap_instance() 在启动后一次性
+#       建库/建号/授权/灌模板 SQL。金镜像缺失或 bootstrap 失败自动回退慢路径。
+GOLD_DIR = Path(os.environ.get("LAB_GOLD_DIR", str(DATA_DIR / "gold" / "mysql-8.0")))
+GOLD_ROOT_PASSWORD_FILE = GOLD_DIR.parent / "root.password"
+
 
 def ensure_dirs() -> None:
     """确保数据目录存在（模块加载不产生副作用，由入口显式调用）。"""
