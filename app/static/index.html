@@ -55,6 +55,25 @@
   .b-rec { background: #f3f4f6; color: var(--muted); }
   .lab-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
   .lab-head .meta { color: var(--muted); font-size: 12px; }
+  /* 学生命令回放：每人一个可折叠表格，等宽字体还原学生实际敲的样子 */
+  details.stu-sql { border: 1px solid var(--line); border-radius: 10px; margin: 8px 0; background: #fff; }
+  details.stu-sql > summary { cursor: pointer; padding: 8px 12px; list-style: none;
+         display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  details.stu-sql > summary::-webkit-details-marker { display: none; }
+  details.stu-sql > summary::before { content: "▸"; color: var(--muted); font-size: 12px; }
+  details.stu-sql[open] > summary::before { content: "▾"; }
+  details.stu-sql[open] > summary { border-bottom: 1px solid var(--line); background: var(--bg);
+         border-radius: 10px 10px 0 0; }
+  .sql-wrap { overflow-x: auto; }
+  .sql-table td { vertical-align: top; }
+  .sql-table th { background: #fafafa; }
+  .q-idx { color: var(--muted); width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
+  .q-ts { color: var(--muted); white-space: nowrap; width: 68px; font-variant-numeric: tabular-nums; }
+  .q-sql { font-family: ui-monospace, "Cascadia Code", Consolas, "Courier New", monospace;
+           white-space: pre-wrap; word-break: break-word; }
+  .q-sql.bad { color: var(--red); }
+  .q-detail { color: var(--muted); font-size: 12px; max-width: 220px; }
+  .b-ok { background: var(--green-soft); color: var(--green); }
   .err { background: var(--red-soft); color: var(--red); border-radius: 8px;
          padding: 8px 12px; margin-top: 10px; font-size: 13px; display: none; }
   .ok { background: var(--green-soft); color: var(--green); border-radius: 8px;
@@ -346,31 +365,50 @@ async function exportCsv(id) {
 }
 
 const VERDICT = { syntax_error: "语法错误", unknown_table: "表不存在",
-                  dangerous: "危险操作", hint: "写法提示" };
+                  unknown_column: "列不存在", dangerous: "危险操作", hint: "写法提示" };
+const VERDICT_CLS = { syntax_error: "b-fail", unknown_table: "b-fail",
+                      unknown_column: "b-fail", dangerous: "b-fail", hint: "b-creat" };
 const esc = s => String(s || "").replace(/[&<>"]/g,
   c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
+// 错题诊断：每个学生一张「命令回放表」——按时间顺序列出学生实际敲的 SQL 原样
+// （含执行正确的），教师能直接看出他是怎么一步步写错的，而不是只看几条摘要。
 async function loadErrors(id) {
   const box = document.getElementById("err-" + id);
   box.innerHTML = '<p class="hint"><span class="spin"></span>正在采集并诊断学生 SQL…</p>';
   try {
-    const d = await api(`/api/labs/${id}/errors`);
-    const bad = d.students.filter(s => s.problems > 0);
-    const head = `<p class="hint">本轮新采集 ${d.collected.new_queries} 条 SQL，
-      新增问题 ${d.collected.new_problems} 条（采集的是 general_log，学生无需任何配合）</p>`;
-    if (!bad.length) {
-      box.innerHTML = head + '<p class="hint">暂时没有发现错误，学生都在顺利练习中。</p>';
+    const d = await api(`/api/labs/${id}/errors?refresh=1`);
+    const list = d.students.slice().sort((a, b) =>
+      b.problems - a.problems || String(a.student_id).localeCompare(String(b.student_id)));
+    const head = `<p class="hint">本轮新采集 ${d.collected.new_queries} 条 SQL · 新增问题
+      ${d.collected.new_problems} 条（从 general_log 采集，学生无需任何配合）。
+      每人一张表，按时间还原他实际敲的命令原样；SHOW / USE / SET 等客户端自动语句已过滤。</p>`;
+    if (!list.length) {
+      box.innerHTML = head + '<p class="hint">该实验单还没有练习记录——学生连上执行过 SQL 后再点一次。</p>';
       return;
     }
-    box.innerHTML = head + bad.map(s => `
-      <div style="margin:8px 0;padding:10px 12px;background:var(--amber-soft);border-radius:8px">
-        <b>${esc(s.student_id)}</b>
-        <span class="meta">练习 ${s.total} 条 · 正确 ${s.ok} · 问题 ${s.problems}</span>
-        ${s.samples.map(x => `<div style="margin-top:8px">
-          <code style="font-size:12px;color:var(--red)">${esc(x.sql)}</code>
-          <span class="badge b-fail">${VERDICT[x.verdict] || x.verdict}</span>
-          <div class="hint">${esc(x.detail)}</div></div>`).join("")}
-      </div>`).join("");
+    box.innerHTML = head + list.map(s => {
+      const rows = s.timeline.map((x, i) => `<tr>
+        <td class="q-idx">${i + 1}</td>
+        <td class="q-ts">${esc(x.t)}</td>
+        <td class="q-sql ${x.verdict === "ok" ? "" : "bad"}">${esc(x.sql)}</td>
+        <td>${x.verdict === "ok"
+          ? '<span class="badge b-ok">未发现问题</span>'
+          : `<span class="badge ${VERDICT_CLS[x.verdict] || "b-fail"}">${VERDICT[x.verdict] || x.verdict}</span>`}</td>
+        <td class="q-detail">${esc(x.detail)}</td>
+      </tr>`).join("");
+      return `<details class="stu-sql"${s.problems ? " open" : ""}>
+        <summary><b>${esc(s.student_id)}</b>
+          <span style="color:var(--muted);font-size:12px">练习 ${s.total} 条 · 无问题 ${s.ok} · 有问题 ${s.problems}</span>
+          ${s.problems ? `<span class="badge b-fail">${s.problems} 处待改</span>`
+                       : '<span class="badge b-ok">未见问题</span>'}</summary>
+        <div class="sql-wrap"><table class="sql-table">
+          <tr><th>#</th><th>时间</th><th>学生敲的命令（原样）</th><th>判定</th><th>诊断</th></tr>
+          ${rows || '<tr><td colspan="5" class="hint">暂无记录</td></tr>'}
+        </table></div>
+        <p class="hint" style="padding:6px 12px 10px">仅显示该学生最近 ${d.timeline_per_student} 条</p>
+      </details>`;
+    }).join("");
   } catch (e) {
     box.innerHTML = `<p style="color:var(--red)">${esc(e.message)}</p>`;
   }

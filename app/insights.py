@@ -18,13 +18,13 @@ from __future__ import annotations
 import logging
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import sqlglot
 from sqlglot import exp
 from sqlglot.errors import ParseError
 
-from . import db, models
+from . import crypto, db, models
 
 log = logging.getLogger("mysql-lab.insights")
 
@@ -69,6 +69,9 @@ _NOISE_PREFIX = (
     # mysql 官方镜像 entrypoint 用 PREPARE/EXECUTE 循环执行初始化 SQL，
     # 开启 general_log 后这些内部语句会灌进几万条，必须挡掉
     "PREPARE ", "EXECUTE ", "DEALLOCATE ", "DROP PREPARE",
+    # 平台自己为了做表/列名校验而发的元数据查询（会同样写进 general_log，
+    # 不挡掉就会被下一轮采集当成"学生 SQL"，全是误报）
+    "SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA",
 )
 
 
@@ -110,7 +113,8 @@ def collect_lab(lab_id: int) -> dict:
     conn = db.connect()
     try:
         instances = conn.execute(
-            "SELECT id, student_id, container_name, volume_path, db_name FROM instances "
+            "SELECT id, student_id, container_name, volume_path, db_name, "
+            "db_user, db_pass_enc FROM instances "
             "WHERE lab_id = ? AND status IN ('running','stopped')", (lab_id,)
         ).fetchall()
         offsets = {r["instance_id"]: r["offset"] for r in conn.execute(
@@ -135,7 +139,14 @@ def collect_lab(lab_id: int) -> dict:
             except OSError:
                 offset = 0
             log.warning("实例 %s 无采集基线，从当前位置 %d 开始", inst["container_name"], offset)
-        tables = _instance_tables(inst["container_name"], inst["db_name"])
+        schema = None
+        try:
+            schema = _instance_schema(inst["container_name"], inst["db_name"],
+                                      inst["db_user"],
+                                      crypto.decrypt(inst["db_pass_enc"]))
+        except Exception as e:  # 解密失败（老数据/密钥变更）→ 不校验
+            log.debug("实例 %s 凭据解密失败: %s", inst["container_name"], e)
+        tables, columns = (schema if schema else (None, None))
         try:
             size = os.path.getsize(path)
             if size <= offset:
@@ -151,9 +162,14 @@ def collect_lab(lab_id: int) -> dict:
                 continue
             body, consumed = chunk[:cut + 1], offset + cut + 1
             new_offsets[inst["container_name"]] = consumed
-            for line in body.decode("utf-8", "replace").splitlines():
+            text = body.decode("utf-8", "replace")
+            # 本批里有 DDL（学生自己建表/改表）时，库结构正在变，
+            # 拿采集前的快照校验列名必然误报 → 本批跳过列检查
+            cols_arg = None if re.search(
+                r"\b(CREATE|ALTER|DROP)\s+TABLE\b", text, re.I) else columns
+            for line in text.splitlines():
                 row = _parse_line(line, lab_id, inst["container_name"],
-                                  inst["student_id"], now, tables)
+                                  inst["student_id"], now, tables, cols_arg)
                 if row:
                     new_rows.append(row)
         except OSError as e:
@@ -177,41 +193,49 @@ def collect_lab(lab_id: int) -> dict:
             "new_problems": sum(1 for r in new_rows if r[5] != "ok")}
 
 
-def _instance_tables(container: str, db_name: str) -> set[str] | None:
-    """取学生库当前表名集合（docker exec 查 information_schema）。
+def _instance_schema(container: str, db_name: str, db_user: str, db_pass: str
+                     ) -> tuple[set[str], dict[str, set[str]]] | None:
+    """取学生库的 (表名集合, {表: 列集合})，一次 information_schema 查询搞定。
 
-    失败返回 None（调用方跳过表名校验，不影响采集主流程）。
+    用**学生账号**查而不是 root：权限最小（information_schema 只会返回他有权限
+    的对象，天然限定在自己的 lab_ 库），也不依赖 root 密码在各条创建路径上一致。
+    失败返回 None —— 调用方跳过表名/列名校验，宁可漏判也不误判。
     """
     import subprocess
     try:
-        pw = subprocess.run(
-            ["docker", "exec", container, "printenv", "MYSQL_ROOT_PASSWORD"],
-            capture_output=True, text=True, timeout=10,
-        ).stdout.strip()
-        if not pw:
-            return None
-        sql = (f"SELECT table_name FROM information_schema.tables "
+        sql = ("SELECT table_name, column_name FROM information_schema.columns "
                f"WHERE table_schema='{db_name}'")
         r = subprocess.run(
-            ["docker", "exec", container, "mysql", "-h127.0.0.1", "-uroot",
-             f"-p{pw}", "-N", "-B", "-e", sql],
+            ["docker", "exec", container, "mysql", "-h127.0.0.1",
+             f"-u{db_user}", f"-p{db_pass}", "-N", "-B", "-e", sql],
             capture_output=True, text=True, timeout=15,
         )
-        return {ln.strip().lower() for ln in r.stdout.splitlines() if ln.strip()}
+        if r.returncode != 0:
+            log.debug("取表结构失败 %s: %s", container,
+                      (r.stderr or "").strip()[-160:])
+            return None
+        cols: dict[str, set[str]] = {}
+        for ln in r.stdout.splitlines():
+            parts = ln.split("\t")
+            if len(parts) >= 2 and parts[0].strip():
+                cols.setdefault(parts[0].strip().lower(), set()).add(
+                    parts[1].strip().lower())
+        return (set(cols), cols) if cols else None
     except Exception as e:  # 容器不在/超时等：降级为不校验
-        log.debug("取表清单失败 %s: %s", container, e)
+        log.debug("取表结构异常 %s: %s", container, e)
         return None
 
 
 def _parse_line(line: str, lab_id: int, instance_id: str, student_id: str,
-                now: str, tables: set[str] | None = None) -> tuple | None:
+                now: str, tables: set[str] | None = None,
+                columns: dict[str, set[str]] | None = None) -> tuple | None:
     m = _LINE_RE.match(line)
     if not m or m.group("cmd") != "Query":
         return None  # 只关心 Query（Connect/Quit 等忽略）
     sql = (m.group("arg") or "").strip()
     if not sql:
         return None
-    verdict, detail = classify(sql, tables)
+    verdict, detail = classify(sql, tables, columns)
     if verdict == "noise":
         return None
     # 日志时间戳是 UTC（带 Z），转成本地时区再存
@@ -227,11 +251,16 @@ def _parse_line(line: str, lab_id: int, instance_id: str, student_id: str,
 # ---------------------------------------------------------------------------
 # 诊断：sqlglot 解析 + 教学高频坑检测
 # ---------------------------------------------------------------------------
-def classify(sql: str, tables: set[str] | None = None) -> tuple[str, str]:
+def classify(sql: str, tables: set[str] | None = None,
+             columns: dict[str, set[str]] | None = None) -> tuple[str, str]:
     """返回 (verdict, detail)。
 
-    verdict: ok | syntax_error | unknown_table | dangerous | hint | noise
+    verdict: ok | syntax_error | unknown_table | unknown_column | dangerous | hint | noise
     tables: 学生库现有表名集合（小写）；提供时启用"表名拼错"校验。
+    columns: {表名: 列名集合}；提供时启用"列名拼错"校验（等价于 ERROR 1054）。
+
+    判定顺序刻意对齐 MySQL 执行时的报错顺序（语法 → 表 → 列 → 语义警告），
+    这样教师看到的判定和学生屏幕上实际弹出的报错是同一件事。
     """
     s = sql.strip().rstrip(";").strip()
     up = s.upper()
@@ -259,12 +288,23 @@ def classify(sql: str, tables: set[str] | None = None) -> tuple[str, str]:
         if tables is not None:
             for tb in t.find_all(exp.Table):
                 name = (tb.name or "").lower()
-                schema = (tb.db or "").lower()
-                if not name or schema in ("information_schema", "mysql",
-                                          "performance_schema", "sys"):
+                db_part = (tb.db or "").lower()
+                if not name or db_part in ("information_schema", "mysql",
+                                           "performance_schema", "sys"):
                     continue
                 if name not in tables:
                     return "unknown_table", f"表 {tb.name} 不存在（名字拼错或还没创建）"
+        # 列名拼错（等价于 ERROR 1054）：库里所有表的列名集合都命中不了 → 必错。
+        # 只看"整库都不存在"，不做单表归属判断，避免多表 JOIN/别名场景误报。
+        if columns:
+            all_cols = set().union(*columns.values())
+            aliases = {(a.alias or "").lower() for a in t.find_all(exp.Alias)}
+            aliases.discard("")
+            for col in t.find_all(exp.Column):
+                cname = (col.name or "").lower()
+                if not cname or cname == "*" or cname in all_cols or cname in aliases:
+                    continue
+                return "unknown_column", f"列 {col.name} 不存在（字段名拼错？）"
         if isinstance(t, (exp.Update, exp.Delete)):
             if t.args.get("where") is None:
                 verb = "UPDATE" if isinstance(t, exp.Update) else "DELETE"
@@ -290,20 +330,42 @@ _DIAG_CACHE: dict[int, tuple[float, dict]] = {}
 _DIAG_TTL = 30.0
 
 
-def lab_errors(lab_id: int, samples_per_student: int = 5, recent: int = 20) -> dict:
-    """采集 + 汇总：每个学生的练习总量、问题分布、最近几条原始 SQL。"""
+def lab_errors(lab_id: int, samples_per_student: int = 5, recent: int = 20,
+               timeline_per_student: int = 15, refresh: bool = False) -> dict:
+    """采集 + 汇总：每个学生的练习量、问题分布、最近几条原始 SQL、**命令时间线**。
+
+    refresh=True 跳过缓存（教师手动点诊断时要看最新内容）。
+    """
     import time
 
     hit = _DIAG_CACHE.get(lab_id)
-    if hit and time.monotonic() - hit[0] < _DIAG_TTL:
+    if hit and not refresh and time.monotonic() - hit[0] < _DIAG_TTL:
         return hit[1]
 
-    result = _lab_errors_impl(lab_id, samples_per_student, recent)
+    result = _lab_errors_impl(lab_id, samples_per_student, recent,
+                              timeline_per_student)
     _DIAG_CACHE[lab_id] = (time.monotonic(), result)
     return result
 
 
-def _lab_errors_impl(lab_id: int, samples_per_student: int, recent: int) -> dict:
+# 教学场景固定东八区：主机时区可能是 UTC（云服务器默认），
+# 直接用 astimezone() 会让教师看到的"14:32 敲的命令"实际是 06:32
+_CST = timezone(timedelta(hours=8))
+
+
+def _fmt_ts(ts: str) -> str:
+    """general_log 的 UTC 时间戳 → 北京时间 HH:MM:SS（解析失败则截字符串兜底）。"""
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_CST).strftime("%H:%M:%S")
+    except (ValueError, TypeError):
+        return ts[11:19] if len(ts) >= 19 else ts
+
+
+def _lab_errors_impl(lab_id: int, samples_per_student: int, recent: int,
+                     timeline_per_student: int = 15) -> dict:
     models.get_lab(lab_id)  # 不存在 → NotFound
     collected = collect_lab(lab_id)
     conn = db.connect()
@@ -316,6 +378,16 @@ def _lab_errors_impl(lab_id: int, samples_per_student: int, recent: int) -> dict
             "SELECT student_id, ts, sql_text, verdict, detail FROM student_queries "
             "WHERE lab_id = ? AND verdict != 'ok' ORDER BY id DESC LIMIT 300", (lab_id,)
         ).fetchall()
+        # 每个学生的最近 N 条「原样命令」（含执行正确的），用于教师端逐人回放表格。
+        # 用窗口函数按学生分组取，避免"全班最近 X 条"把安静的学生截空。
+        tl_rows = conn.execute(
+            "SELECT student_id, ts, sql_text, verdict, detail FROM ("
+            "  SELECT student_id, ts, sql_text, verdict, detail,"
+            "         ROW_NUMBER() OVER (PARTITION BY student_id ORDER BY id DESC) rn"
+            "  FROM student_queries WHERE lab_id = ?"
+            ") WHERE rn <= ? ORDER BY student_id, rn DESC",
+            (lab_id, timeline_per_student),
+        ).fetchall()
     finally:
         conn.close()
 
@@ -323,7 +395,8 @@ def _lab_errors_impl(lab_id: int, samples_per_student: int, recent: int) -> dict
     for r in agg:
         d = per.setdefault(r["student_id"], {"student_id": r["student_id"],
                                              "total": 0, "ok": 0, "problems": 0,
-                                             "by_verdict": {}, "samples": []})
+                                             "by_verdict": {}, "samples": [],
+                                             "timeline": []})
         if r["verdict"] == "ok":
             d["ok"] += r["c"]
         else:
@@ -345,10 +418,19 @@ def _lab_errors_impl(lab_id: int, samples_per_student: int, recent: int) -> dict
         d["samples"].append({"ts": r["ts"], "sql": r["sql_text"],
                              "verdict": r["verdict"], "detail": r["detail"]})
 
+    # 命令时间线：不去重、含正确语句，按时间正序（终端回放的阅读顺序）
+    for r in tl_rows:
+        d = per.get(r["student_id"])
+        if not d:
+            continue
+        d["timeline"].append({"t": _fmt_ts(r["ts"]), "sql": r["sql_text"],
+                              "verdict": r["verdict"], "detail": r["detail"]})
+
     students = sorted(per.values(), key=lambda x: (-x["problems"], x["student_id"]))
     return {
         "lab_id": lab_id,
         "collected": collected,
         "students": students,
         "recent": [dict(r) for r in problems[:recent]],
+        "timeline_per_student": timeline_per_student,
     }

@@ -335,7 +335,12 @@ def bootstrap_instance(container_name: str, root_password: str,
     import time
 
     sql = (
+        # 金镜像里同时存在 root@'localhost' 与 root@'%'：TCP 连接（-h127.0.0.1，
+        # 容器带 skip-name-resolve）匹配的是 root@'%'，只改 localhost 会导致
+        # 实例密码根本连不上 root。两个账户一起改，保持"容器环境变量里的
+        # MYSQL_ROOT_PASSWORD = 实际可用 root 密码"这一不变式。
         f"ALTER USER 'root'@'localhost' IDENTIFIED BY '{root_password}';"
+        f"ALTER USER IF EXISTS 'root'@'%' IDENTIFIED BY '{root_password}';"
         f"CREATE DATABASE IF NOT EXISTS `{db_name}` "
         f"CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
         f"CREATE USER IF NOT EXISTS '{db_user}'@'%' IDENTIFIED BY '{db_pass}';"

@@ -171,10 +171,13 @@ def api_export_lab(lab_id: int, request: Request,
 
 
 @app.get("/api/labs/{lab_id}/errors")
-def api_lab_errors(lab_id: int,
+def api_lab_errors(lab_id: int, refresh: bool = False,
                    user: dict = Depends(require_role("teacher", "assistant"))):
-    """错题诊断（P1）：增量采集学生 SQL 后，返回每人练习量/问题分布/最近错例。"""
-    return insights.lab_errors(lab_id)
+    """错题诊断（P1）：增量采集学生 SQL，返回每人练习量/问题分布/命令时间线。
+
+    refresh=true 跳过 30s 缓存：教师刚让学生敲完 SQL 就点诊断时，需要看到最新内容。
+    """
+    return insights.lab_errors(lab_id, refresh=refresh)
 
 
 # ---------------------------------------------------------------------------
