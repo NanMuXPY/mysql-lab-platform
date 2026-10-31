@@ -104,7 +104,7 @@ def main() -> int:
 
     # 真实登录：进容器用学生账号 SELECT 1（mysql 协议完整握手）
     # 密码从元数据库解密（脚本就跑在服务器上，直接用平台自己的加密层）
-    from app import crypto, db as appdb
+    from app import config, crypto, db as appdb
     conn = appdb.connect()
     try:
         rows = conn.execute(
@@ -140,7 +140,8 @@ def main() -> int:
         f"\n- 时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}",
         f"- 服务器：{sh('nproc')} 核 / {free_out.splitlines()[1].split()[1]} MB 内存",
         f"- 容器限额：0.5 核 CPU / 256MB 内存（config.LAB_MEM_LIMIT）",
-        f"- 实验单：#{lab_id}（模板 {tpls[0]['name']}，并发 5）",
+        f"- 实验单：#{lab_id}（模板 {tpls[0]['name']}，"
+        f"并发 {config.CREATE_CONCURRENCY}）",
         "",
         "## 结果",
         f"| 指标 | 数值 |",

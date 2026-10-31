@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -40,11 +41,37 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
+
+def _ensure_secret() -> str:
+    """APP_SECRET 缺失时自动生成并落盘到 .env（首次启动自举）。
+
+    为什么不直接报错退出：这是给老师用的教学平台，"克隆代码 + 起服务"就该能跑，
+    让使用者先手工造一个密钥是没必要的门槛。
+    但密钥**必须落盘**：它是学生数据库密码的解密密钥，重启后若换了一把，
+    所有已加密的密码就全解不开了。所以写进 .env（600 权限）并提示要备份。
+    """
+    if os.environ.get("APP_SECRET"):
+        return os.environ["APP_SECRET"]
+    secret = secrets.token_hex(32)
+    try:
+        env_file = ROOT / ".env"
+        with env_file.open("a", encoding="utf-8") as f:
+            f.write(f"\nAPP_SECRET={secret}\n")
+        env_file.chmod(0o600)
+    except OSError as e:  # 只读目录等：退化为仅本进程有效，启动检查会提示
+        print(f"[config] 无法写入 .env（{e}），APP_SECRET 仅本进程有效")
+    os.environ["APP_SECRET"] = secret
+    return secret
+
+
+# 是否来自 .env / 环境变量（false 说明是本次自举生成的，需提示备份）
+_SECRET_PREEXISTING = bool(os.environ.get("APP_SECRET"))
+
 # ---------------------------------------------------------------------------
 # 元数据 / 密钥
 # ---------------------------------------------------------------------------
-# 学生密码对称加密密钥（任务 3 接入）；缺失时启动检查会告警
-APP_SECRET = os.environ.get("APP_SECRET", "")
+# 学生密码对称加密密钥（任务 3 接入）
+APP_SECRET = _ensure_secret()
 
 # ---------------------------------------------------------------------------
 # 容器参数（交接文档第五节：照抄，别自己改）
@@ -102,9 +129,39 @@ def ensure_dirs() -> None:
     LABS_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# MySQL 8.0 每个实例启动时通过 io_setup() 向内核申请约 2700 个 AIO 事件。
+# 默认 fs.aio-max-nr=65536 → 只能容纳 24 个实例，第 25 个起 mysqld 直接起不来，
+# 表现为容器 "is not running / is restarting"，和内存、端口、磁盘都无关，极难排查。
+# （4核8G 实测：50 个实例只有 24 个成功，调大该值后 44 个成功）
+AIO_PER_INSTANCE = 2700
+AIO_RECOMMENDED = 1048576
+
+
+def _aio_warning() -> str | None:
+    """按端口池规划容量反查内核 AIO 上限是否够用。"""
+    try:
+        with open("/proc/sys/fs/aio-max-nr", encoding="utf-8") as f:
+            limit = int(f.read().strip())
+    except (OSError, ValueError):
+        return None  # 非 Linux 或不可读：不做判断
+    capacity = limit // AIO_PER_INSTANCE
+    slots = PORT_RANGE_END - PORT_RANGE_START + 1
+    if capacity < slots:
+        return (f"内核 AIO 事件上限偏低：fs.aio-max-nr={limit}，每个 MySQL 实例约需 "
+                f"{AIO_PER_INSTANCE}，当前只能承载 {capacity} 个实例"
+                f"（端口池规划 {slots} 个）。第 {capacity + 1} 个起容器会反复重启。"
+                f"修复：sysctl -w fs.aio-max-nr={AIO_RECOMMENDED}"
+                f"（并写入 /etc/sysctl.d/99-mysql-lab.conf 持久化）")
+    return None
+
+
 def check_startup() -> list[str]:
     """启动自检，返回告警列表（供任务 3 的 FastAPI lifespan 调用）。"""
     warnings: list[str] = []
-    if not APP_SECRET:
-        warnings.append("APP_SECRET 未设置：任务 3 接入密码加密前必须配置（生产 32+ 字节随机值）")
+    if not _SECRET_PREEXISTING:
+        warnings.append("APP_SECRET 未预置，已自动生成并写入 .env："
+                        "务必与 data/app.db 一起备份，丢失后学生密码将无法解密")
+    aio = _aio_warning()
+    if aio:
+        warnings.append(aio)
     return warnings

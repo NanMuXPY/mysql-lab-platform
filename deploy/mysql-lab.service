@@ -1,0 +1,19 @@
+[Unit]
+Description=MySQL 实验环境一键交付平台（FastAPI）
+Documentation=https://github.com/NanMuXPY/mysql-lab-platform
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/mysql-lab
+# 学生端要回显真实可连地址；换机器时只改这一行
+Environment=LAB_PUBLIC_HOST=47.120.71.41
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/root/mysql-lab/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+# MySQL 实验平台运行依赖（Python 3.11+）
+# 安装：python3 -m venv venv && venv/bin/pip install -r requirements.txt
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
+PyJWT>=2.8
+cryptography>=42.0
+docker>=7.0
+sqlglot>=23.0
