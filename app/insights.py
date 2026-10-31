@@ -104,19 +104,26 @@ def set_baseline(container_name: str, volume_path: str) -> int:
 # ---------------------------------------------------------------------------
 # 采集
 # ---------------------------------------------------------------------------
-def collect_lab(lab_id: int) -> dict:
+def collect_lab(lab_id: int, container: str | None = None) -> dict:
     """增量采集一个实验单全部实例的新增 SQL，返回本轮统计。
 
     每个实例额外查一次"库里有哪些表"，用于识别"表名拼错"这类常见失误
     （语法合法但执行会失败 —— 1064 纯语法错 MySQL 不写 general log，抓不到）。
+
+    container 非空时只采该实例：学生端「我的错题」每次刷新都采一次，
+    若每次都扫全班 20+ 容器（每个还要 docker exec 查 schema），
+    20 个学生同时刷新就是 400 次 exec —— 只采自己那一个是 O(1)。
     """
     conn = db.connect()
     try:
-        instances = conn.execute(
-            "SELECT id, student_id, container_name, volume_path, db_name, "
-            "db_user, db_pass_enc FROM instances "
-            "WHERE lab_id = ? AND status IN ('running','stopped')", (lab_id,)
-        ).fetchall()
+        sql = ("SELECT id, student_id, container_name, volume_path, db_name, "
+               "db_user, db_pass_enc FROM instances "
+               "WHERE lab_id = ? AND status IN ('running','stopped')")
+        params: list = [lab_id]
+        if container:
+            sql += " AND container_name = ?"
+            params.append(container)
+        instances = conn.execute(sql, params).fetchall()
         offsets = {r["instance_id"]: r["offset"] for r in conn.execute(
             "SELECT instance_id, offset FROM instance_log_offsets").fetchall()}
     finally:
@@ -433,4 +440,119 @@ def _lab_errors_impl(lab_id: int, samples_per_student: int, recent: int,
         "students": students,
         "recent": [dict(r) for r in problems[:recent]],
         "timeline_per_student": timeline_per_student,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 练习报告（教师导出 CSV）与学生自查视图（学习闭环）
+# ---------------------------------------------------------------------------
+_LABEL = {"syntax_error": "语法错误", "unknown_table": "表不存在",
+          "unknown_column": "列不存在", "dangerous": "危险操作", "hint": "写法提示"}
+
+# 建议刻意写成"下一步该做什么"，不是复述错误——学生看到"语法错误"四个字仍然不会改
+_ADVICE = {
+    "syntax_error": "检查关键字拼写、括号与引号是否成对、语句末尾是否多了逗号",
+    "unknown_table": "先 SHOW TABLES 看库里有哪些表，再对照表名逐字核对",
+    "unknown_column": "用 DESC 表名 查看字段；字段名不要加引号，别名要先在 SELECT 里定义",
+    "dangerous": "UPDATE/DELETE 必须带 WHERE，否则整张表的行都会被改掉/删光",
+    "hint": "SELECT * 改成明确列出需要的列；JOIN 必须带 ON 条件，否则得到的是笛卡尔积",
+}
+
+
+def report_rows(lab_id: int) -> list[dict]:
+    """练习报告：每个学生一行（教师导出 CSV，也是期末平时分的客观依据）。
+
+    以**实例名单**为基准而不是以"有练习记录的人"为基准：
+    班里 30 人只有 5 人练过时，报告必须列出 30 行，其中 25 行练习数为 0——
+    "谁根本没开始"恰恰是教师最需要看到的信息，不能被 join 掉。
+    """
+    data = lab_errors(lab_id, refresh=True)
+    conn = db.connect()
+    try:
+        insts = conn.execute(
+            "SELECT student_id, status FROM instances "
+            "WHERE lab_id = ? AND status != 'recycled' ORDER BY student_id",
+            (lab_id,)).fetchall()
+        # 最后活跃时间与"最近一条问题命令"单独查：lab_errors 的 timeline 只保留
+        # 最近 N 条，用它反推"最后一次"在练习量大的班级会不准
+        last_ts = {r["student_id"]: r["ts"] for r in conn.execute(
+            "SELECT student_id, MAX(ts) AS ts FROM student_queries "
+            "WHERE lab_id = ? GROUP BY student_id", (lab_id,))}
+        last_bad: dict[str, dict] = {}
+        for r in conn.execute(
+            "SELECT student_id, sql_text, detail FROM ("
+            "  SELECT student_id, sql_text, detail, ROW_NUMBER() OVER ("
+            "    PARTITION BY student_id ORDER BY id DESC) rn"
+            "  FROM student_queries WHERE lab_id = ? AND verdict != 'ok'"
+            ") WHERE rn = 1", (lab_id,)):
+            last_bad[r["student_id"]] = dict(r)
+    finally:
+        conn.close()
+
+    stats = {s["student_id"]: s for s in data["students"]}
+    roster = [(r["student_id"], r["status"]) for r in insts]
+    # 万一个别学生有练习记录但实例已不在（重置/换机），也别丢他的数据
+    for sid in stats:
+        if all(sid != x[0] for x in roster):
+            roster.append((sid, "recycled"))
+
+    rows = []
+    for sid, inst_status in roster:
+        s = stats.get(sid)
+        total = (s["total"] if s else 0) or 0
+        bv = s["by_verdict"] if s else {}
+        bad = last_bad.get(sid, {})
+        rows.append({
+            "student_id": sid,
+            "instance_status": inst_status,
+            "total": total,
+            "ok": s["ok"] if s else 0,
+            "problems": s["problems"] if s else 0,
+            "syntax_error": bv.get("syntax_error", 0),
+            "unknown_table": bv.get("unknown_table", 0),
+            "unknown_column": bv.get("unknown_column", 0),
+            "dangerous": bv.get("dangerous", 0),
+            "hint": bv.get("hint", 0),
+            "accuracy": round((s["ok"] if s else 0) * 100.0 / total, 1) if total else 0.0,
+            "last_active": _fmt_ts(last_ts[sid]) if sid in last_ts else "",
+            "last_problem_sql": bad.get("sql_text", ""),
+            "last_problem_detail": bad.get("detail", ""),
+        })
+    return rows
+
+
+def student_detail(lab_id: int, student_id: str, container: str,
+                   limit: int = 40) -> dict:
+    """学生自查视图：我的练习统计 + 我的命令回放（时间正序）+ 错因与改法。"""
+    collect_lab(lab_id, container=container)
+    conn = db.connect()
+    try:
+        agg = conn.execute(
+            "SELECT verdict, COUNT(*) AS c FROM student_queries "
+            "WHERE lab_id = ? AND student_id = ? GROUP BY verdict",
+            (lab_id, student_id)).fetchall()
+        rows = conn.execute(
+            "SELECT ts, sql_text, verdict, detail FROM student_queries "
+            "WHERE lab_id = ? AND student_id = ? ORDER BY id DESC LIMIT ?",
+            (lab_id, student_id, limit)).fetchall()
+    finally:
+        conn.close()
+
+    by = {r["verdict"]: r["c"] for r in agg}
+    total = sum(by.values())
+    ok = by.get("ok", 0)
+    tips = [{"verdict": v, "label": _LABEL.get(v, v), "count": c,
+             "advice": _ADVICE.get(v, "")}
+            for v, c in sorted(by.items(), key=lambda kv: -kv[1]) if v != "ok"]
+    return {
+        "student_id": student_id,
+        "total": total,
+        "ok": ok,
+        "problems": total - ok,
+        "accuracy": round(ok * 100.0 / total, 1) if total else 0.0,
+        "tips": tips,
+        "timeline": [{"t": _fmt_ts(r["ts"]), "sql": r["sql_text"],
+                      "verdict": r["verdict"], "detail": r["detail"]}
+                     for r in reversed(rows)],
+        "shown": min(len(rows), limit),
     }

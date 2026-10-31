@@ -1,0 +1,7 @@
+# MySQL 实验平台：整点对账（到期回收 + 僵尸实例清理 + 端口租约归还）
+# 安装：cp scripts/cron-mysql-lab-reconcile /etc/cron.d/mysql-lab-reconcile && chmod 644 $_
+# 注意：/etc/cron.d/ 下的文件必须是 5 段时间表达式 + 用户 + 命令，
+#       不能写 shebang（cron 会把 `#!/bin/sh` 当用户名字段解析并整行丢弃）。
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+0 * * * * root cd /root/mysql-lab && /usr/bin/python3.11 scripts/reconcile.py >> /var/log/mysql-lab-reconcile.log 2>&1

@@ -244,6 +244,28 @@ def list_instances_by_lab(lab_id: int) -> list[dict]:
         conn.close()
 
 
+def find_active_instance_by_student(student_id: str) -> dict | None:
+    """按学号找该学生**最新**的活跃实例（含实验单信息），学生端登录用。
+
+    同一学号会横跨多个实验单（一学期十几次实验），取最新创建的那条：
+    学生手里记着的密码一定是最近一次发给他的，老实验单的密码大概率已随重置作废。
+    返回 dict 含 db_pass_enc（调用方自行解密比对，不要直接吐给前端）。
+    """
+    conn = db.connect()
+    try:
+        row = conn.execute(
+            "SELECT i.*, l.name AS lab_name, l.class_name AS class_name, "
+            "       l.status AS lab_status "
+            "FROM instances i JOIN labs l ON l.id = i.lab_id "
+            "WHERE i.student_id = ? AND i.status IN ('creating','running','stopped') "
+            "ORDER BY i.id DESC LIMIT 1",
+            (student_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def get_instance(instance_id: int) -> dict:
     conn = db.connect()
     try:

@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="data:,">
+<title>我的实验 · MySQL 练习记录</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --line: #e5e7eb;
+    --text: #1f2329; --muted: #6b7280;
+    --blue: #2563eb; --blue-soft: #eff6ff;
+    --green: #16a34a; --green-soft: #f0fdf4;
+    --amber: #d97706; --amber-soft: #fffbeb;
+    --red: #dc2626; --red-soft: #fef2f2;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+         background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.6; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 20px 14px 64px; }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  header h1 { font-size: 17px; font-weight: 600; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+          padding: 18px; margin-bottom: 14px; }
+  .card h2 { font-size: 15px; font-weight: 600; margin-bottom: 10px; }
+  .card h2 small { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  input { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px;
+          font-size: 14px; font-family: inherit; background: #fff; }
+  input:focus { outline: 2px solid var(--blue-soft); border-color: var(--blue); }
+  button { border: none; border-radius: 8px; padding: 9px 16px; font-size: 14px;
+           cursor: pointer; background: var(--blue); color: #fff; font-family: inherit; }
+  button:hover { opacity: .9; }
+  button.ghost { background: #fff; color: var(--text); border: 1px solid var(--line); }
+  button.small { padding: 5px 11px; font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .hint { font-size: 12px; color: var(--muted); }
+  .err { background: var(--red-soft); color: var(--red); border-radius: 8px;
+         padding: 8px 12px; margin-top: 10px; font-size: 13px; display: none; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; white-space: nowrap; }
+  .b-ok { background: var(--green-soft); color: var(--green); }
+  .b-fail { background: var(--red-soft); color: var(--red); }
+  .b-hint { background: var(--amber-soft); color: var(--amber); }
+  /* 成绩仪表：一个大数字比一堆小字更快让人知道"我练得怎么样" */
+  .score { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+  .score .big { font-size: 40px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+  .score .big span { font-size: 16px; font-weight: 500; margin-left: 2px; }
+  .score .kpi { display: flex; gap: 18px; flex-wrap: wrap; }
+  .kpi div { min-width: 62px; }
+  .kpi b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+  .kpi span { font-size: 12px; color: var(--muted); }
+  .tip { border-left: 3px solid var(--amber); background: var(--amber-soft);
+         border-radius: 0 8px 8px 0; padding: 8px 12px; margin-top: 8px; font-size: 13px; }
+  .tip b { color: var(--amber); }
+  .tip p { color: #7c4a03; font-size: 12px; margin-top: 2px; }
+  .conn-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+  .conn-grid div { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .conn-grid span { display: block; font-size: 11px; color: var(--muted); }
+  .conn-grid b { font-family: ui-monospace, Consolas, monospace; font-size: 14px; word-break: break-all; }
+  .q-sql { font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+           white-space: pre-wrap; word-break: break-word; }
+  .q-sql.bad { color: var(--red); }
+  .q-idx { color: var(--muted); width: 26px; text-align: right; font-variant-numeric: tabular-nums; }
+  .q-ts { color: var(--muted); white-space: nowrap; width: 64px; font-variant-numeric: tabular-nums; }
+  tr.bad-row { background: #fffafa; }
+  .q-detail { color: var(--muted); font-size: 12px; max-width: 180px; }
+  .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--blue);
+          border-top-color: transparent; border-radius: 50%; animation: r .8s linear infinite;
+          vertical-align: -1px; margin-right: 6px; }
+  @keyframes r { to { transform: rotate(360deg); } }
+  @media (max-width: 520px) { .q-detail { display: none; } th:nth-child(5) { display: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>我的实验 · 练习记录</h1>
+    <div class="who" id="who"></div>
+  </header>
+
+  <div class="card" id="login">
+    <h2>登录查看</h2>
+    <p class="hint" style="margin-bottom:6px">用老师发给你的<b>学号</b>和<b>数据库密码</b>登录，不需要注册。</p>
+    <label>学号</label>
+    <input id="f-sid" placeholder="如 240201">
+    <label>数据库密码</label>
+    <input id="f-pw" type="password" placeholder="老师发的连接密码"
+           onkeydown="if(event.key==='Enter')doLogin()">
+    <div style="margin-top:14px"><button style="width:100%" onclick="doLogin()">登 录</button></div>
+    <div class="err" id="login-err"></div>
+    <p class="hint" style="margin-top:12px">这里只显示你自己敲过的 SQL。老师那份报告里能看到全班的情况。</p>
+  </div>
+
+  <div id="main" style="display:none">
+    <div class="card">
+      <h2>① 我的数据库 <small>用 Navicat / DBeaver 连这个地址</small></h2>
+      <div class="conn-grid" id="conn"></div>
+      <p class="hint" style="margin-top:8px">密码就是你刚才输入的；填错了连不上时先回来这里核对一遍。</p>
+    </div>
+
+    <div class="card">
+      <h2>② 我的练习情况 <small>统计到最近一次刷新</small></h2>
+      <div class="score" id="stats"></div>
+      <div id="tips"></div>
+    </div>
+
+    <div class="card">
+      <h2>③ 我敲过的命令 <small>按时间顺序，执行成功的也列出来</small></h2>
+      <div style="margin-bottom:8px">
+        <button class="ghost small" onclick="loadMy()">刷新</button>
+      </div>
+      <div id="timeline"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+let TOKEN = localStorage.getItem("stu_token") || "";
+const $ = id => document.getElementById(id);
+const esc = s => String(s || "").replace(/[&<>"]/g,
+  c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function api(path, opt = {}) {
+  opt.headers = { "Content-Type": "application/json",
+                  ...(TOKEN ? { Authorization: "Bearer " + TOKEN } : {}) };
+  return fetch(path, opt).then(async r => {
+    if (r.status === 401 && TOKEN) { logout(); throw new Error("登录已过期，请重新登录"); }
+    if (!r.ok) { const e = await r.json().catch(() => ({}));
+                 throw new Error(typeof e.detail === "string" ? e.detail : r.status); }
+    return r.json();
+  });
+}
+
+function logout() {
+  TOKEN = ""; localStorage.removeItem("stu_token");
+  $("login").style.display = ""; $("main").style.display = "none"; $("who").innerHTML = "";
+}
+
+async function doLogin() {
+  const err = $("login-err"); err.style.display = "none";
+  try {
+    const r = await fetch("/api/student/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ student_id: $("f-sid").value.trim(),
+                             password: $("f-pw").value.trim() }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(typeof d.detail === "string" ? d.detail : "登录失败");
+    TOKEN = d.token; localStorage.setItem("stu_token", TOKEN);
+    loadMy();
+  } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+}
+
+function scoreColor(a) { return a >= 80 ? "var(--green)" : a >= 60 ? "var(--amber)" : "var(--red)"; }
+
+async function loadMy() {
+  try {
+    const d = await api("/api/student/my");
+    $("login").style.display = "none";
+    $("main").style.display = "";
+    $("who").innerHTML = `<span class="hint">${esc(d.student_id)} · ${esc(d.class_name || "")}</span>
+      <button class="ghost small" onclick="logout()" style="margin-left:10px">退出</button>`;
+
+    $("conn").innerHTML = [
+      ["主机", d.conn.host], ["端口", d.conn.port],
+      ["数据库", d.conn.database], ["用户名", d.conn.user],
+    ].map(([k, v]) => `<div><span>${k}</span><b>${esc(v)}</b></div>`).join("");
+
+    const noQ = d.total === 0;
+    $("stats").innerHTML = noQ
+      ? `<p class="hint">还没有记录到你的 SQL。连上数据库随便执行一句（比如 <code>SHOW TABLES;</code>），
+         再回来点「刷新」就能看到。</p>`
+      : `<div><div class="big" style="color:${scoreColor(d.accuracy)}">${d.accuracy}<span>%</span></div>
+           <div class="hint">执行成功率</div></div>
+         <div class="kpi">
+           <div><b>${d.total}</b><span>敲过 ${d.total} 条</span></div>
+           <div><b style="color:var(--green)">${d.ok}</b><span>跑通了</span></div>
+           <div><b style="color:var(--red)">${d.problems}</b><span>有问题</span></div>
+         </div>`;
+
+    // 错因 + 改法：只给"哪一类错了几次"和"下一步怎么改"，不堆术语
+    $("tips").innerHTML = d.tips.length
+      ? d.tips.map(t => `<div class="tip"><b>${esc(t.label)} × ${t.count}</b><p>${esc(t.advice)}</p></div>`).join("")
+      : (noQ ? "" : `<div class="tip" style="border-left-color:var(--green);background:var(--green-soft)">
+           <b style="color:var(--green)">没有发现明显问题</b><p style="color:#166534">继续把实验要求的查询都跑一遍。</p></div>`);
+
+    $("timeline").innerHTML = d.timeline.length ? `<table>
+        <tr><th>#</th><th>时间</th><th>我敲的命令</th><th>结果</th><th>提示</th></tr>
+        ${d.timeline.map((x, i) => `<tr class="${x.verdict === "ok" ? "" : "bad-row"}">
+          <td class="q-idx">${i + 1}</td>
+          <td class="q-ts">${esc(x.t)}</td>
+          <td class="q-sql ${x.verdict === "ok" ? "" : "bad"}">${esc(x.sql)}</td>
+          <td>${x.verdict === "ok"
+            ? '<span class="badge b-ok">成功</span>'
+            : `<span class="badge ${x.verdict === "hint" ? "b-hint" : "b-fail"}">
+                 ${x.verdict === "hint" ? "可优化" : "没跑通"}</span>`}</td>
+          <td class="q-detail">${esc(x.detail)}</td>
+        </tr>`).join("")}</table>
+        <p class="hint" style="margin-top:8px">只显示最近 ${d.shown} 条。</p>`
+      : `<p class="hint">暂无命令记录。</p>`;
+  } catch (e) {
+    if (TOKEN) { $("login-err").textContent = e.message; $("login-err").style.display = "block";
+                 logout(); }
+  }
+}
+
+if (TOKEN) loadMy();
+</script>
+</body>
+</html>

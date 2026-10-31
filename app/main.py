@@ -21,13 +21,15 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import secrets
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
-from . import audit, config, insights, labs, models, ports
+from . import audit, config, crypto, insights, labs, models, ports
+from .auth import create_student_token, get_student_ctx
 from .auth import login as do_login
 from .auth import require_role
 from .errors import NotFound, PlatformError, PortPoolExhausted
@@ -180,6 +182,32 @@ def api_lab_errors(lab_id: int, refresh: bool = False,
     return insights.lab_errors(lab_id, refresh=refresh)
 
 
+@app.get("/api/labs/{lab_id}/report.csv")
+def api_lab_report(lab_id: int,
+                   user: dict = Depends(require_role("teacher", "assistant"))):
+    """练习报告 CSV：一名学生一行，供期末平时分与讲评用（utf-8-sig 保证 Excel 不乱码）。
+
+    与「导出连接信息 CSV」分工：那个是分发票据（含密码），这个是看学得怎么样。
+    """
+    rows = insights.report_rows(lab_id)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["学号", "实例状态", "练习总数", "无问题", "有问题", "语法错误", "表不存在",
+                "列不存在", "危险操作", "写法提示", "正确率(%)", "最后活跃",
+                "最近一条问题命令", "诊断"])
+    for r in rows:
+        w.writerow([r["student_id"], r["instance_status"], r["total"], r["ok"],
+                    r["problems"], r["syntax_error"], r["unknown_table"],
+                    r["unknown_column"], r["dangerous"], r["hint"], r["accuracy"],
+                    r["last_active"], r["last_problem_sql"], r["last_problem_detail"]])
+    return Response(
+        content=buf.getvalue().encode("utf-8-sig"),
+        media_type="text/csv",
+        headers={"Content-Disposition":
+                 f"attachment; filename=lab_{lab_id}_report.csv"},
+    )
+
+
 # ---------------------------------------------------------------------------
 # 任务 6：学生信息总览 + 审计日志
 # ---------------------------------------------------------------------------
@@ -234,11 +262,79 @@ def api_reset_instance(instance_id: int, request: Request,
 
 
 # ---------------------------------------------------------------------------
+# 学生端：我的练习（学习闭环 —— 学生也能看到自己敲过什么、错在哪）
+# 不建学生账号：用「学号 + 数据库密码」登录，密码本来就是平台发到他手上的
+# ---------------------------------------------------------------------------
+class StudentLoginIn(BaseModel):
+    student_id: str
+    password: str
+
+
+@app.post("/api/student/login")
+def api_student_login(body: StudentLoginIn, request: Request):
+    sid = body.student_id.strip()
+    inst = models.find_active_instance_by_student(sid)
+    # 统一文案：不区分"学号不存在"和"密码不对"，避免被拿来探测同学学号
+    if not inst:
+        raise HTTPException(401, detail="学号或密码不正确（也可能是实验已回收，请找老师确认）")
+    try:
+        real = crypto.decrypt(inst["db_pass_enc"])
+    except Exception:  # 密钥变更 / 老数据
+        raise HTTPException(400, detail="该实例凭据无法解密，请联系老师重置")
+    if not secrets.compare_digest(real, body.password.strip()):
+        raise HTTPException(401, detail="学号或密码不正确（也可能是实验已回收，请找老师确认）")
+    audit.log(None, "student.login", target=sid,
+              detail=f"lab={inst['lab_id']}",
+              ip=request.client.host if request.client else "")
+    return {
+        "token": create_student_token(sid, inst["lab_id"], inst["id"]),
+        "student_id": sid,
+        "lab_id": inst["lab_id"],
+        "lab_name": inst["lab_name"],
+        "class_name": inst.get("class_name") or "",
+    }
+
+
+@app.get("/api/student/my")
+def api_student_my(request: Request, ctx: dict = Depends(get_student_ctx)):
+    """我的练习：连接信息 + 练习统计 + 命令回放 + 错因改法。
+
+    只按 token 里的 sid 查数据，**不接受**任何请求参数指定学号（越权面为零）。
+    """
+    inst = models.get_instance(ctx["instance_id"])
+    if inst["status"] == "recycled":
+        raise HTTPException(404, detail="本次实验环境已回收，记录不再保留")
+    lab = models.get_lab(inst["lab_id"])
+    detail = insights.student_detail(inst["lab_id"], inst["student_id"],
+                                     inst["container_name"])
+    return {
+        "student_id": inst["student_id"],
+        "lab_name": lab["name"],
+        "class_name": lab["class_name"],
+        "conn": {
+            # 没配 LAB_PUBLIC_HOST 时用请求的 host 兜底：学生从外网访问，
+            # 拿到的就是他刚才访问的那个地址，比"见通知"有用
+            "host": config.PUBLIC_HOST or request.url.hostname or "",
+            "port": inst["port"],
+            "database": inst["db_name"],
+            "user": inst["db_user"],
+        },
+        "status": inst["status"],
+        **detail,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 教师端 WebUI（唯一页面，学生不提供任何界面——学生用 Navicat/DBeaver 直连）
 # ---------------------------------------------------------------------------
 @app.get("/", include_in_schema=False)
 def index():
     return FileResponse(Path(__file__).parent / "static" / "index.html")
+
+
+@app.get("/my", include_in_schema=False)
+def student_page():
+    return FileResponse(Path(__file__).parent / "static" / "my.html")
 
 
 @app.get("/healthz")
