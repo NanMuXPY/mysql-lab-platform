@@ -4,4 +4,7 @@
 #       不能写 shebang（cron 会把 `#!/bin/sh` 当用户名字段解析并整行丢弃）。
 SHELL=/bin/sh
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-0 * * * * root cd /root/mysql-lab && /usr/bin/python3.11 scripts/reconcile.py >> /var/log/mysql-lab-reconcile.log 2>&1
+# 解释器必须与部署时装依赖的那个一致：用 venv 部署就用 venv 的 python，
+# 否则 cron 里 import fastapi/docker 全部失败，对账会静默失效（表现为实验单过期不回收）。
+# 别用 `python3` / `python3.11` 这种泛称，PATH 在 cron 里和登录 shell 不同。
+0 * * * * root cd /root/mysql-lab && /root/mysql-lab/venv/bin/python scripts/reconcile.py >> /var/log/mysql-lab-reconcile.log 2>&1

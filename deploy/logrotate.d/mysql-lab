@@ -1,0 +1,9 @@
+/var/log/mysql-lab/*.log /root/reconcile.log {
+  weekly
+  rotate 8
+  size 20M
+  compress
+  missingok
+  notifempty
+  copytruncate
+}

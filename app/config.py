@@ -84,10 +84,19 @@ MEM_SWAP = os.environ.get("LAB_MEM_SWAP", "256m")   # 必须与 mem_limit 相同
 PIDS_LIMIT = int(os.environ.get("LAB_PIDS_LIMIT", "200"))
 LOG_MAX_SIZE = os.environ.get("LAB_LOG_MAX_SIZE", "10m")
 LOG_MAX_FILE = os.environ.get("LAB_LOG_MAX_FILE", "2")
-RESTART_POLICY = {"Name": "on-failure", "MaximumRetryCount": 3}
+# 必须是 unless-stopped，不能用 on-failure：
+#   系统关机时 mysqld 收到 SIGTERM 正常退出（ExitCode=0），on-failure 只重启
+#   非 0 退出，所以服务器一重启，全班实例全部静默停掉，而元数据仍是 running。
+#   unless-stopped 的语义正好：机器重来自动拉起，教师手动 docker stop 则不拉起。
+RESTART_POLICY = {"Name": "unless-stopped"}
 
-# --cap-drop ALL 后 mysql entrypoint chown 失败的最小补集（验证过）
-MYSQL_REQUIRED_CAPS = ("CHOWN", "SETUID", "SETGID")
+# --cap-drop ALL 后 mysql entrypoint 正常工作所需的最小补集（每项都实测过，别乱加）
+#   CHOWN / SETUID / SETGID —— entrypoint 要 chown datadir 并降到 mysql 用户运行
+#   DAC_OVERRIDE —— 关键：容器内 root 要能读属主为 mysql、权限 750 的库目录。
+#     少了它，**首次启动正常，一旦 datadir 里有了真实的库目录，重启就必然崩溃**：
+#     entrypoint 启动时遍历 datadir 会报 "find: /var/lib/mysql/<db>: Permission denied"
+#     然后 exit 1，容器陷入 restarting 循环。这个坑只在重启后才显形，极易漏测。
+MYSQL_REQUIRED_CAPS = ("CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE")
 
 # 容器时区：学生 NOW()/CURDATE() 与北京时间一致
 MYSQL_TZ = os.environ.get("MYSQL_TZ", "Asia/Shanghai")

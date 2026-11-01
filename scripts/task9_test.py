@@ -112,7 +112,11 @@ def main() -> int:
     if not creds:
         print(f"\n结果：{PASS} 通过 / {FAIL} 失败")
         return 1
-    stu = creds[0]
+    # 选一个**有练习记录**的学生来验学生端；直接取 creds[0] 会撞上"没练过的学生"，
+    # 那样 total=0 的断言语义上是对的，但用例本身失去了意义（真实班级必然有人在名单里没动手）。
+    active_sid = next((r.get("学号") for r in rows if r.get("练习总数", "0") != "0"), None)
+    stu = next((c for c in creds if c["student_id"] == active_sid), creds[0])
+    check("选中了有练习记录的学生", active_sid is not None, f"sid={stu['student_id']}")
 
     # ---- 5. 学生端登录与自查 ----
     s, b = req("/api/student/login",

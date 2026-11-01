@@ -35,7 +35,9 @@ ACTIVE = ("creating", "running", "stopped")
 
 def main(dry_run: bool = False) -> int:
     try:
-        live = {c.name for c in docker_svc._client().containers.list(all=True)}
+        containers = docker_svc._client().containers.list(all=True)
+        live = {c.name for c in containers}
+        state = {c.name: c.status for c in containers}
     except Exception as e:
         print(f"连不上 Docker，无法对账：{e}")
         return 2
@@ -60,6 +62,34 @@ def main(dry_run: bool = False) -> int:
 
     if ghosts and not dry_run:
         _fix_instances(ghosts)
+
+    # 1.2) 状态漂移：元数据说 running，容器其实没在跑（exited / created / restarting）
+    #      典型场景是服务器重启——最早用 on-failure 策略时，mysqld 正常退出（code 0）
+    #      不会被补拉，全班实例静默变灰而教师端仍显示"运行中"。这里兜底重新拉起，
+    #      拉不起来才降级为 stopped，避免界面继续骗人。
+    drifted = [r for r in rows if r["status"] == "running"
+               and state.get(r["container_name"]) not in (None, "running")]
+    if drifted:
+        print(f"状态漂移（记录 running，容器实际未运行）{len(drifted)} 条")
+        for r in drifted:
+            print(f"  - {r['container_name']} :{r['port']} 实际={state.get(r['container_name'])}")
+        if not dry_run:
+            revived, demoted = 0, []
+            for r in drifted:
+                try:
+                    docker_svc._client().containers.get(r["container_name"]).start()
+                    revived += 1
+                except Exception as e:
+                    demoted.append((r["id"], str(e)[:80]))
+            if revived:
+                print(f"  已重新拉起 {revived} 个")
+            if demoted:
+                with db.write() as c:
+                    for iid, err in demoted:
+                        c.execute(
+                            "UPDATE instances SET status='stopped', last_error=? WHERE id=?",
+                            ("对账：容器无法拉起 " + err, iid))
+                print(f"  无法拉起 {len(demoted)} 个，已置 stopped")
 
     # 1.5) 反向僵尸：容器还活着但元数据库已无活跃记录（回收漏删、半成品等）→ 删容器
     active_names = {r["container_name"] for r in rows}
@@ -106,7 +136,7 @@ def main(dry_run: bool = False) -> int:
 
     if dry_run:
         print(f"\n[dry-run] 到期回收 {expired_n} 个、待纠正实例 {len(ghosts)} 条、"
-              f"实验单 {fixed_labs} 条；未写库。")
+              f"待拉起实例 {len(drifted)} 条、实验单 {fixed_labs} 条；未写库。")
         return 0
     print(f"\n完成：到期回收 {expired_n} 个，纠正实例 {len(ghosts)} 条，实验单 {fixed_labs} 条")
     print("端口池：", ports.stats())

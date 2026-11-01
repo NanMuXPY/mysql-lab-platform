@@ -8,8 +8,13 @@ Requires=docker.service
 [Service]
 Type=simple
 WorkingDirectory=/root/mysql-lab
-# 学生端要回显真实可连地址；换机器时只改这一行
-Environment=LAB_PUBLIC_HOST=47.120.71.41
+# 学生端要回显真实可连地址。此项**不要写死在模板里**（换机器容易忘），
+# 部署时用 drop-in 覆盖（见 docs/部署说明.md 第七节）：
+#   /etc/systemd/system/mysql-lab.service.d/env.conf
+#       [Service]
+#       Environment=LAB_PUBLIC_HOST=<这台机器的公网 IP>
+# 留空时学生端显示"（见老师发的通知）"，不会报错，但学生拿不到地址。
+Environment=LAB_PUBLIC_HOST=
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/root/mysql-lab/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 Restart=always
