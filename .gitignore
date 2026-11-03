@@ -22,3 +22,4 @@ Thumbs.db
 .playwright-cli/
 .playwright/
 .tmp/
+*.tmp
