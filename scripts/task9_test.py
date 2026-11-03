@@ -146,7 +146,9 @@ def main() -> int:
                {"student_id": stu["student_id"], "password": "definitely-wrong"})
     check("错误密码被拒 401", s == 401, f"status={s}")
     s, _ = req("/api/student/login", {"student_id": "000000", "password": "x"})
-    check("不存在的学号被拒 401", s == 401, f"status={s}")
+    # 000000 是虚构学号，本脚本从不成功登录它，所以连续跑第 5 次起会被登录限流
+    # 返回 429——语义上仍属"被拒"，断言放宽到 401/429（真实学号不受影响）
+    check("不存在的学号被拒 401/429", s in (401, 429), f"status={s}")
     s, _ = req("/api/student/my", tok=T)
     check("教师 token 当学生用被拒 403", s == 403, f"status={s}")
     s, _ = req("/api/student/my")

@@ -122,6 +122,25 @@ CREATE_PING_INTERVAL = int(os.environ.get("LAB_PING_INTERVAL", "3"))
 PUBLIC_HOST = os.environ.get("LAB_PUBLIC_HOST", "")
 
 # ---------------------------------------------------------------------------
+# 安全基线（v1.0.2）
+# ---------------------------------------------------------------------------
+# 登录失败限流：连续 max_fails 次失败锁 lock_seconds 秒。
+# 教师账号是唯一能开课/回收/看全班密码的入口，此前可无限次试密码。
+LOGIN_MAX_FAILS = int(os.environ.get("LOGIN_MAX_FAILS", "5"))
+LOGIN_LOCK_SECONDS = int(os.environ.get("LOGIN_LOCK_SECONDS", "300"))
+LOGIN_FAIL_WINDOW = int(os.environ.get("LOGIN_FAIL_WINDOW", "900"))  # 计数窗口，超时自动清零
+# 限流状态表上限：攻击者可伪造海量学号撑爆字典，必须设上限 + LRU 淘汰
+LOGIN_MAX_TRACKED = int(os.environ.get("LOGIN_MAX_TRACKED", "10000"))
+
+# 是否信任反向代理传来的 X-Forwarded-For。
+# 默认 false：直连部署时客户端可任意伪造该头，信任它等于把限流关了。
+# 只有确认前面挂了 Nginx 且 8000 端口不对外暴露时，才设为 true。
+TRUST_PROXY = os.environ.get("LAB_TRUST_PROXY", "").lower() in ("1", "true", "yes")
+
+# 超过该耗时的请求以 WARNING 记录，便于定位"学生说很卡"
+SLOW_REQUEST_MS = int(os.environ.get("SLOW_REQUEST_MS", "1000"))
+
+# ---------------------------------------------------------------------------
 # 金镜像（性能优化：跳过 mysqld --initialize，单实例就绪 85s → ~15s）
 # ---------------------------------------------------------------------------
 # 预初始化好的系统表 datadir 模板（由 scripts/make_gold.py 一次性生成）。

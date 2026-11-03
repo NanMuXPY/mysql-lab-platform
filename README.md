@@ -4,6 +4,8 @@
 
 一台 4 核 8G 云服务器稳定支撑 **30 人同时实验**（实测 72.7 秒全部就绪、30/30 登录成功），成本只有"按人买云数据库"的零头。
 
+> 接手/说明用途请直接看 **[`docs/交付说明书-v1.0.2.md`](docs/交付说明书-v1.0.2.md)**：含三个岗位版本的项目简介条目、四个关键取舍的答法、运维速查表、七个只在重启时暴露的坑、安全基线、接手自检清单。
+
 ## 实测数字
 
 | 指标 | 数值 | 说明 |
@@ -26,6 +28,7 @@
   - 学生端 `/my`：学号 + 数据库密码登录，看自己的成功率、错因**改法建议**、自己的命令回放（不建学生账号体系）
 - **资源治理**：端口租约/归还、僵尸实例对账（`reconcile.py`）、到期自动回收（systemd timer + cron）
 - **安全基线**：JWT 角色门禁、PBKDF2 密码哈希、Fernet 加密存储学生库密码、容器 cap-drop、学生接口只认 token 内的学号（改 URL 也看不到别人的数据）
+- **公网防护（v1.0.2）**：登录失败限流（连错 5 次锁 5 分钟，键为 IP+账号，防爆破不误伤同 IP 的班级）、安全响应头（CSP / 防点击劫持 / 禁 MIME 嗅探）、API 一律不缓存、请求耗时日志（>1s 记 WARNING，学生说"很卡"能定位）、失败登录也写审计
 
 ## 技术栈
 
@@ -64,6 +67,7 @@ venv/bin/python scripts/make_gold.py
 ```bash
 python scripts/task9_test.py http://<host>:8000          # 接口验收（含 6 条鉴权边界）
 python scripts/task5_test.py                             # 生命周期 22 项
+python scripts/security_test.py                          # 安全基线 24 项（不需要 Docker）
 python scripts/ui_e2e_task9.py http://<host>:8000        # 真浏览器 E2E：开课→交付→导出→学生端
 python scripts/stress_test.py --n 30                     # 真实 API 压测并出报告
 ```

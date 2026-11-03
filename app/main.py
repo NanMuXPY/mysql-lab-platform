@@ -28,7 +28,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
-from . import audit, config, crypto, insights, labs, models, ports
+from . import audit, config, crypto, insights, labs, models, ports, security
 from .auth import create_student_token, get_student_ctx
 from .auth import login as do_login
 from .auth import require_role
@@ -41,6 +41,9 @@ logging.basicConfig(
 log = logging.getLogger("mysql-lab")
 
 app = FastAPI(title="MySQL 实验环境一键交付平台", version="0.4.0")
+
+# 安全基线中间件：安全响应头 + 请求耗时日志（见 security.py 顶部说明）
+app.middleware("http")(security.security_middleware)
 
 
 @app.exception_handler(PlatformError)
@@ -83,11 +86,30 @@ class LoginIn(BaseModel):
 
 @app.post("/api/auth/login")
 def api_login(body: LoginIn, request: Request):
-    """登录，成功发 JWT（交接文档第六节契约: {token, role, name}）。"""
-    result = do_login(body.login, body.password)
+    """登录，成功发 JWT（交接文档第六节契约: {token, role, name}）。
+
+    失败限流：连续 5 次失败锁 5 分钟（config.LOGIN_*）。此前该接口可无限试密码，
+    而教师账号能导出全班数据库密码，是最值得爆破的一个入口。
+    """
+    ip = security.client_ip(request)
+    key = security.login_key("pw", request, body.login)
+    security.login_limiter.check(key)          # 已锁则直接 429，不查库
+    try:
+        result = do_login(body.login, body.password)
+    except HTTPException as e:
+        if e.status_code != 401:
+            raise
+        left = security.login_limiter.fail(key)
+        # 失败也必须留痕：此前失败登录零记录，事后无法判断是否被撞库
+        audit.log(None, "login.failed", target=body.login, ip=ip)
+        minutes = max(1, config.LOGIN_LOCK_SECONDS // 60)
+        detail = "账号或密码错误"
+        detail += (f"（再错 {left} 次将锁定 {minutes} 分钟）" if left
+                   else f"，已锁定 {minutes} 分钟")
+        raise HTTPException(status_code=401, detail=detail) from e
+    security.login_limiter.reset(key)          # 成功即清零，不连累正常用户
     user = models.get_user_by_login(body.login)
-    audit.log(user["id"], "login", target=body.login,
-              ip=request.client.host if request.client else "")
+    audit.log(user["id"], "login", target=body.login, ip=ip)
     return result
 
 
@@ -131,7 +153,7 @@ def api_create_lab(body: LabCreateIn, request: Request,
     )
     audit.log(user["id"], "lab.create", target=str(lab_id),
               detail=f"name={body.name} students={len(body.student_ids)}",
-              ip=request.client.host if request.client else "")
+              ip=security.client_ip(request))
     return {"lab_id": lab_id, "total": len(body.student_ids)}
 
 
@@ -224,6 +246,20 @@ def api_audit(limit: int = 100,
     return audit.recent(min(max(limit, 1), 500))
 
 
+@app.get("/api/security/stats")
+def api_security_stats(user: dict = Depends(require_role("teacher"))):
+    """登录限流器现状：被跟踪的账号数、当前锁定数、阈值。
+
+    运维意义：若 locked 突然从 0 跳到几十，说明正在被撞库，该看 audit_logs 里
+    的 login.failed 来源 IP 了。只开放给 teacher，助教看不到安全状态。
+    """
+    return {
+        "limiter": security.login_limiter.stats(),
+        "trust_proxy": config.TRUST_PROXY,
+        "slow_request_ms": config.SLOW_REQUEST_MS,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 任务 5：实例生命周期（停止 / 回收 / 重置）
 # ---------------------------------------------------------------------------
@@ -234,7 +270,7 @@ def api_stop_lab(lab_id: int, request: Request,
     result = labs.stop_lab(lab_id)
     audit.log(user["id"], "lab.stop", target=str(lab_id),
               detail=f"stopped={result['stopped']}",
-              ip=request.client.host if request.client else "")
+              ip=security.client_ip(request))
     return result
 
 
@@ -245,7 +281,7 @@ def api_recycle_lab(lab_id: int, request: Request,
     result = labs.recycle_lab(lab_id)
     audit.log(user["id"], "lab.recycle", target=str(lab_id),
               detail=f"recycled={result['recycled']}",
-              ip=request.client.host if request.client else "")
+              ip=security.client_ip(request))
     return result
 
 
@@ -257,7 +293,7 @@ def api_reset_instance(instance_id: int, request: Request,
     audit.log(user["id"], "instance.reset",
               target=str(instance_id),
               detail=f"student={result['student_id']} port={result['port']}",
-              ip=request.client.host if request.client else "")
+              ip=security.client_ip(request))
     return result
 
 
@@ -273,19 +309,29 @@ class StudentLoginIn(BaseModel):
 @app.post("/api/student/login")
 def api_student_login(body: StudentLoginIn, request: Request):
     sid = body.student_id.strip()
-    inst = models.find_active_instance_by_student(sid)
+    ip = security.client_ip(request)
+    key = security.login_key("stu", request, sid)
+    security.login_limiter.check(key)          # 已锁则 429，不查库也不解密
+
     # 统一文案：不区分"学号不存在"和"密码不对"，避免被拿来探测同学学号
+    def _reject() -> None:
+        security.login_limiter.fail(key)
+        audit.log(None, "student.login.failed", target=sid, ip=ip)
+        raise HTTPException(
+            401, detail="学号或密码不正确（也可能是实验已回收，请找老师确认）")
+
+    inst = models.find_active_instance_by_student(sid)
     if not inst:
-        raise HTTPException(401, detail="学号或密码不正确（也可能是实验已回收，请找老师确认）")
+        _reject()
     try:
         real = crypto.decrypt(inst["db_pass_enc"])
-    except Exception:  # 密钥变更 / 老数据
-        raise HTTPException(400, detail="该实例凭据无法解密，请联系老师重置")
+    except PlatformError as e:  # 密钥变更 / 老数据
+        raise HTTPException(400, detail="该实例凭据无法解密，请联系老师重置") from e
     if not secrets.compare_digest(real, body.password.strip()):
-        raise HTTPException(401, detail="学号或密码不正确（也可能是实验已回收，请找老师确认）")
+        _reject()
+    security.login_limiter.reset(key)
     audit.log(None, "student.login", target=sid,
-              detail=f"lab={inst['lab_id']}",
-              ip=request.client.host if request.client else "")
+              detail=f"lab={inst['lab_id']}", ip=ip)
     return {
         "token": create_student_token(sid, inst["lab_id"], inst["id"]),
         "student_id": sid,

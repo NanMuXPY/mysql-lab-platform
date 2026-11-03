@@ -1,0 +1,17 @@
+feat: 公网防护三件套（登录限流/安全响应头/耗时日志）+ 24 项安全验收
+
+v1.0.1 的鉴权该挡的都挡了，但抗打击能力为零：没有任何中间件，没有一处限频。
+三条真实缺口，业务逻辑零改动，全部是增量：
+
+- security.py（新增）
+  - FailLimiter：连错 5 次锁 5 分钟；键取「IP+账号」而非只有 IP，机房 NAT 下不误伤全班；
+    状态表 10000 键上限 + LRU 淘汰，防止伪造海量学号把限流器自己撑成内存 DoS；
+    成功登录清零，不连累正常用户
+  - 安全响应头：CSP / X-Frame-Options DENY / nosniff / Referrer-Policy / Permissions-Policy
+  - API 响应一律 no-store（凭据 CSV、学生记录不能落中间缓存）
+  - 请求耗时日志，>=1s 升 WARNING；未捕获异常也记耗时与路径，不再只剩裸 traceback
+- main.py：教师端与学生端登录接限流；失败登录写 audit（此前撞库事后查不出来）
+- scripts/security_test.py（新增）：24 项验收，临时 DATA_DIR，无需 Docker
+- scripts/task9_test.py：虚构学号 000000 从不成功登录，连跑 5 次会被 429，
+  断言放宽到 401/429（真实学号不受影响）
+- 文档：README + 交付说明书升级 v1.0.2，含三个设计取舍与两个必须知道的后果
