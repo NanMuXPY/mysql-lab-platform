@@ -1,13 +1,16 @@
 """auth.py — 登录、JWT 签发与校验、角色判断（交接文档第三节任务 3）。
 
 - 密码校验：PBKDF2（models.hash_password / verify_password）
-- JWT：HS256，payload 含 sub/uid/role/name/exp，默认 12 小时
+- JWT：HS256，payload 含 sub/uid/role/name/exp/jti，教师 12 小时、学生 6 小时
+- 吊销（v1.0.3）：每个 token 带随机 jti，登出后进 revoked_tokens 表（重启不丢）；
+  校验路径统一在 decode_token 里查一次黑名单——所有角色依赖都从它过，无旁路
 - FastAPI 依赖注入：get_current_user → require_role("teacher") 形式组合
 - 错误语义：无/坏 token → 401；token 有效但角色不符 → 403（验收标准）
 """
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -29,6 +32,7 @@ def create_token(user: dict) -> str:
         "uid": user["id"],
         "role": user["role"],
         "name": user["name"],
+        "jti": uuid.uuid4().hex,          # 吊销用的唯一标识：无它就无法精确作废单个 token
         "iat": now,
         "exp": now + timedelta(hours=_TOKEN_HOURS),
     }
@@ -39,11 +43,17 @@ def create_token(user: dict) -> str:
 def decode_token(token: str) -> dict:
     from . import config
     try:
-        return jwt.decode(token, config.APP_SECRET, algorithms=[_JWT_ALGO])
+        payload = jwt.decode(token, config.APP_SECRET, algorithms=[_JWT_ALGO])
     except jwt.ExpiredSignatureError as e:
         raise HTTPException(status_code=401, detail="登录已过期，请重新登录") from e
     except jwt.InvalidTokenError as e:
         raise HTTPException(status_code=401, detail="无效凭证") from e
+    # 吊销校验放在 decode 里而不是各依赖里：教师端、学生端、logout 全部经过这里，
+    # 不存在"某个接口忘了查黑名单"的旁路。旧版 token 没有 jti，自然跳过（向后兼容）。
+    jti = payload.get("jti")
+    if jti and models.is_token_revoked(jti):
+        raise HTTPException(status_code=401, detail="凭证已注销，请重新登录")
+    return payload
 
 
 def login(login_name: str, password: str) -> dict:
@@ -92,6 +102,7 @@ def create_student_token(student_id: str, lab_id: int, instance_id: int) -> str:
     payload = {
         "sub": student_id, "sid": student_id, "lid": lab_id, "iid": instance_id,
         "role": "student", "name": student_id,
+        "jti": uuid.uuid4().hex,          # 与教师 token 同一吊销机制
         "iat": now, "exp": now + timedelta(hours=6),
     }
     return jwt.encode(payload, config.APP_SECRET, algorithm=_JWT_ALGO)

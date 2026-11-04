@@ -144,6 +144,35 @@ def main() -> int:
         check("reset 后该键不再被跟踪",
               lim.stats()["tracked"] <= 100)
 
+        print("\n== 6. JWT 吊销（logout 即刻作废）==")
+        r = login(c, "assistant", "Assist@Test123")
+        t = r.json()["token"]
+        r = c.get("/api/me", headers={"Authorization": f"Bearer {t}"})
+        check("登出前 token 有效", r.status_code == 200, f"status={r.status_code}")
+        r = c.post("/api/auth/logout", headers={"Authorization": f"Bearer {t}"})
+        check("logout 200", r.status_code == 200, f"status={r.status_code}")
+        r = c.get("/api/me", headers={"Authorization": f"Bearer {t}"})
+        check("登出后同一 token 立即 401", r.status_code == 401, f"status={r.status_code}")
+        r = login(c, "assistant", "Assist@Test123")
+        t2 = r.json()["token"]
+        r = c.get("/api/me", headers={"Authorization": f"Bearer {t2}"})
+        check("重新登录的新 token 不受影响", r.status_code == 200, f"status={r.status_code}")
+        # 伪造一个"无 jti 的旧版 token"：应跳过吊销检查而不是 500
+        import jwt as _jwt
+        from datetime import datetime, timedelta, timezone as _tz
+        from app import config as _cfg
+        legacy = _jwt.encode(
+            {"sub": "assistant", "uid": 2, "role": "assistant", "name": "李助教",
+             "iat": datetime.now(_tz.utc),
+             "exp": datetime.now(_tz.utc) + timedelta(hours=1)},
+            _cfg.APP_SECRET, algorithm="HS256")
+        r = c.get("/api/me", headers={"Authorization": f"Bearer {legacy}"})
+        check("旧版无 jti token 向后兼容（不崩）", r.status_code == 200,
+              f"status={r.status_code}")
+        r = c.post("/api/auth/logout", headers={"Authorization": f"Bearer {legacy}"})
+        check("旧版 token 登出不报错并提示跳过", r.status_code == 200
+              and "跳过" in r.json().get("note", ""), f"{r.status_code} {r.json()}")
+
     print(f"\n{'=' * 52}\n通过 {PASSED} 项，失败 {FAILED} 项")
     return 0 if FAILED == 0 else 1
 

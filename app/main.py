@@ -25,11 +25,12 @@ import secrets
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from . import audit, config, crypto, insights, labs, models, ports, security
-from .auth import create_student_token, get_student_ctx
+from .auth import bearer_scheme, create_student_token, decode_token, get_student_ctx
 from .auth import login as do_login
 from .auth import require_role
 from .errors import NotFound, PlatformError, PortPoolExhausted
@@ -117,6 +118,31 @@ def api_login(body: LoginIn, request: Request):
 def api_me(user: dict = Depends(require_role("teacher", "assistant", "student"))):
     """任何已登录角色可查自己的身份（调试用）。"""
     return user
+
+
+@app.post("/api/auth/logout")
+def api_logout(request: Request,
+               creds: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)):
+    """登出（v1.0.3）：把当前 token 的 jti 写进吊销表，即刻作废。
+
+    教师与学生共用这一个接口——decode_token 对两种 token 都有效。
+    为什么必须做：此前 token 一旦泄漏，最长 12 小时内无人能作废；
+    有了它，发现泄漏（或学生借同学设备看完忘退出）就是一次请求的事。
+    """
+    if creds is None:
+        raise HTTPException(status_code=401, detail="缺少认证凭证")
+    payload = decode_token(creds.credentials)      # 签名/过期/已吊销 全在这里校验
+    jti = payload.get("jti")
+    who = payload.get("sub", "")
+    if jti:
+        models.revoke_token(jti, float(payload["exp"]))
+        action = "logout" if payload.get("role") != "student" else "student.logout"
+        audit.log(None, action, target=who,
+                  ip=security.client_ip(request))
+        return {"ok": True, "note": "凭证已注销"}
+    # 旧版 token 没有 jti：无法精确吊销单枚，只能等它自然过期（最长 12h）
+    return {"ok": True,
+            "note": "旧版凭证无吊销标识，已跳过；重新登录后即可正常注销"}
 
 
 @app.get("/api/templates")

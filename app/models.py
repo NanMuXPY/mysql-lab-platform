@@ -68,6 +68,13 @@ _SCHEMA = {
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_instances_active_port "
         "ON instances(port) WHERE status IN ('creating','running','stopped')"
     ),
+    # JWT 吊销黑名单（v1.0.3）：登出的 token 立即作废，重启不丢（内存黑名单做不到）。
+    # 只存 jti 与过期时刻：过期条目可物理删除，表不会随时间无限增长。
+    "revoked_tokens": """CREATE TABLE IF NOT EXISTS revoked_tokens (
+                    jti        TEXT PRIMARY KEY,
+                    expires_at REAL NOT NULL,
+                    revoked_at TEXT NOT NULL
+                )""",
 }
 
 
@@ -343,3 +350,33 @@ def seed_presets() -> list[str]:
             create_template(name, desc, str(p))
             added.append(name)
     return added
+
+
+# ---------------------------------------------------------------------------
+# revoked_tokens（v1.0.3）：JWT 吊销黑名单
+# 为什么不用进程内存黑名单：systemd Restart=always 的机器上，重启本身是常规运维，
+# 内存黑名单一重启就空，已吊销的 token 全部复活——吊销机制等于没做。
+# SQLite 持久化的代价是每次请求多一次本地读（WAL 下微秒级），30 人课堂无感。
+# ---------------------------------------------------------------------------
+def revoke_token(jti: str, expires_at: float) -> None:
+    """吊销一个 token（按 jti），并顺带清掉已过期的历史条目（表不会无限增长）。"""
+    now = datetime.now().timestamp()
+    with db.write() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO revoked_tokens (jti, expires_at, revoked_at) "
+            "VALUES (?, ?, ?)",
+            (jti, expires_at, _now()),
+        )
+        conn.execute("DELETE FROM revoked_tokens WHERE expires_at < ?", (now,))
+
+
+def is_token_revoked(jti: str) -> bool:
+    """查询 jti 是否已吊销。只读，不走写锁。"""
+    conn = db.connect()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM revoked_tokens WHERE jti = ? LIMIT 1", (jti,)
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()

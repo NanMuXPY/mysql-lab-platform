@@ -1,9 +1,15 @@
 # MySQL 实验平台运行依赖（Python 3.11+）
 # 安装：python3 -m venv venv && venv/bin/pip install -r requirements.txt
-fastapi>=0.110
-uvicorn[standard]>=0.27
-pydantic>=2.6
-PyJWT>=2.8
-cryptography>=42.0
-docker>=7.0
-sqlglot>=23.0
+#
+# 版本策略：每项都是「实测下界 + 主版本上界」（>=x,<y）。
+# 只写 >= 的话，换机重装会静默装上不兼容的大版本——SQLite 写锁、
+# uvicorn 线程模型这类行为差异只有压测才暴露，装完不会报错。
+# 上界以 2026-11-03 本机实测全绿（25+22+24 项验收）的版本为基线；
+# 升级依赖 = 放宽上界 + 完整跑一遍 scripts/ 下验收脚本，不要只看 healthz。
+fastapi>=0.110,<1.0          # 实测 0.162.0
+uvicorn[standard]>=0.27,<1.0 # 实测 0.54.0
+pydantic>=2.6,<3.0           # 实测 2.14.2
+PyJWT>=2.8,<3.0              # 实测 2.15.1
+cryptography>=42.0,<51.0     # 实测 50.0.2（Fernet 学生密码加密）
+docker>=7.0,<8.0             # 实测 7.2.0（Docker SDK，唯一碰容器的依赖）
+sqlglot>=23.0,<31.0          # 实测 30.27.0（AST 错因判定与方言版本耦合，升级必须重跑 insights 用例）
