@@ -62,6 +62,11 @@ def platform_error_handler(request: Request, exc: PlatformError):
 @app.on_event("startup")
 def startup() -> None:
     config.ensure_dirs()
+    # LAB_PUBLIC_HOST=auto（弹性部署场景）：从云 metadata 探测本机公网 IP。
+    # 探测失败返回空串，此处保持原值不覆盖——绝不因 metadata 抖动让 CSV 主机变空。
+    resolved = config.resolve_public_host()
+    if resolved:
+        config.PUBLIC_HOST = resolved
     models.init()
     ports.init()
     audit.init()

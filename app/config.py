@@ -7,9 +7,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 from pathlib import Path
+
+log = logging.getLogger("mysql-lab.config")
 
 # ---------------------------------------------------------------------------
 # 路径
@@ -118,8 +121,46 @@ CREATE_WAIT_TIMEOUT = int(os.environ.get("LAB_CREATE_WAIT_TIMEOUT", "180"))  # �
 CREATE_PING_RETRIES = int(os.environ.get("LAB_PING_RETRIES", "40"))
 CREATE_PING_INTERVAL = int(os.environ.get("LAB_PING_INTERVAL", "3"))
 
-# CSV 导出中的主机地址（空则用请求的 Host）；正式部署设为服务器公网 IP 或域名
+# CSV 导出与学生端回显的主机地址。
+# 支持三种取值：
+#   <具体 IP/域名>  —— 固定服务器用，最直白
+#   auto           —— 弹性场景（按量开机、用完释放）用：启动时从云厂商 metadata
+#                     探测本机公网 IP，新机器零手工配置。探测失败安全回退为空，
+#                     学生端显示"（见老师发的通知）"，不会报错
+#   空             —— 用请求的 Host 兜底（维持 v1.0.2 前的行为）
 PUBLIC_HOST = os.environ.get("LAB_PUBLIC_HOST", "")
+
+# 云厂商 metadata 服务地址：只在云主机内网可达，用户输入进不了这里，无 SSRF 面
+_ECS_METADATA_URLS = (
+    "http://100.100.100.200/latest/meta-data/eipv4",      # 阿里云 EIP
+    "http://100.100.100.200/latest/meta-data/public-ipv4",  # 阿里云分配的公网 IP
+    "http://metadata.tencentyun.com/latest/meta-data/public-ipv4",  # 腾讯云
+)
+
+
+def resolve_public_host() -> str:
+    """解析最终的公网地址（main.startup 调用，结果写回 PUBLIC_HOST）。
+
+    返回空串时调用方保持 PUBLIC_HOST 原值——即"探测失败就退回手工配置/请求 Host"，
+    绝不把空值覆盖掉已配置的地址（否则一次 metadata 抖动会让 CSV 里的主机变空）。
+    """
+    if PUBLIC_HOST and PUBLIC_HOST.lower() != "auto":
+        return PUBLIC_HOST                      # 手工配置，原样生效
+    if PUBLIC_HOST.lower() != "auto":
+        return ""                               # 未配置，维持空（请求 Host 兜底）
+    import urllib.request
+    for url in _ECS_METADATA_URLS:
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                ip = resp.read().decode().strip()
+            # 只接受合法公网 IPv4，防止 metadata 返回异常内容污染 CSV
+            if ip and all(c.isdigit() or c == "." for c in ip) and ip.count(".") == 3:
+                log.info("LAB_PUBLIC_HOST=auto 探测到公网 IP: %s (%s)", ip, url)
+                return ip
+        except (OSError, ValueError):
+            continue   # 本机不是云主机 / metadata 不通，试下一个来源
+    log.warning("LAB_PUBLIC_HOST=auto 但未能探测到公网 IP，学生端将显示提示文案")
+    return ""
 
 # ---------------------------------------------------------------------------
 # 安全基线（v1.0.2）

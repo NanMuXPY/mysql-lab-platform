@@ -173,6 +173,20 @@ def main() -> int:
         check("旧版 token 登出不报错并提示跳过", r.status_code == 200
               and "跳过" in r.json().get("note", ""), f"{r.status_code} {r.json()}")
 
+        print("\n== 7. 弹性部署配置（LAB_PUBLIC_HOST=auto）==")
+        from app import config as _config
+        _config.PUBLIC_HOST = "1.2.3.4"
+        check("固定 IP 原样生效", _config.resolve_public_host() == "1.2.3.4")
+        _config.PUBLIC_HOST = ""
+        check("未配置时返回空（请求 Host 兜底）",
+              _config.resolve_public_host() == "")
+        _config.PUBLIC_HOST = "auto"
+        # 本机不是云主机，metadata 全部不可达：必须安全回退空串而不是异常
+        got = _config.resolve_public_host()
+        check("auto 且探测不到时安全回退（不崩、不乱填）",
+              got == "", f"got={got!r}")
+        _config.PUBLIC_HOST = ""   # 还原，避免影响其他用例
+
     print(f"\n{'=' * 52}\n通过 {PASSED} 项，失败 {FAILED} 项")
     return 0 if FAILED == 0 else 1
 
