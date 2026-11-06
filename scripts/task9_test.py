@@ -6,7 +6,7 @@
   3. 鉴权边界 —— 教师 token 不能当学生用、学生 token 不能碰教师接口
 
 用法：python scripts/task9_test.py [base_url]
-      默认 http://127.0.0.1:8000（服务器本机）；本机验远程传 http://<服务器公网IP>:8000
+      默认 http://127.0.0.1:8000（服务器本机）；本机验远程传 http://<服务器IP>:8000
 依赖：仅标准库 urllib，不需要 requests
 """
 

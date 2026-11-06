@@ -22,7 +22,7 @@ import time
 
 from playwright.sync_api import sync_playwright
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "http://<服务器公网IP>:8000"
+BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT = ROOT / "data" / "ui_test"
 OUT.mkdir(parents=True, exist_ok=True)

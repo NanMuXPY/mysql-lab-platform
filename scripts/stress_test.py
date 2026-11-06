@@ -1,6 +1,6 @@
 """stress_test.py — 任务 7：批量交付压测（交接文档第八节第 7 项）。
 
-压出写进项目简介的三个数字：总耗时、内存占用、单实例均值。
+压出报告用的三个数字：总耗时、内存占用、单实例均值。
 
 做法（全部走平台真实 API，不走捷径直连 Docker）：
   1. 登录教师账号，创建一个 N 人的实验单（并发 5 的真实交付路径）
@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import pathlib
 import subprocess
@@ -32,7 +33,7 @@ import urllib.request  # noqa: E402
 
 BASE = "http://127.0.0.1:8000"
 TEACHER = "teacher"
-PASSWORD = "<演示用默认密码，部署时须修改>"   # 种子教师密码；正式部署改密后用 --user/--pass 覆盖
+PASSWORD = os.environ.get("LAB_PASS", "")   # 种子教师密码；用 --pass 或环境变量 LAB_PASS 传入，不要写死
 
 
 def api(path: str, method: str = "GET", body: dict | None = None,

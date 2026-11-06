@@ -258,6 +258,6 @@ with socket.socket() as s:
 check(f"实例端口 {host_port} TCP 可连", ok)
 
 print(f"\n    样例连接信息（学生视角，密码不回显）: "
-      f"host=<服务器公网IP> port={host_port} user={row['db_user']} db={row['db_name']}")
+      f"host=127.0.0.1 port={host_port} user={row['db_user']} db={row['db_name']}")
 print(f"\n===== 任务 4 验收: {PASS} 通过 / {FAIL} 失败 =====")
 sys.exit(1 if FAIL else 0)
